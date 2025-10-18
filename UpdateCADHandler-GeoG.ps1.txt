@@ -1,0 +1,76 @@
+﻿# Requires Python and pyproj installed
+# Install pyproj via: pip install pyproj
+
+# --- CONFIG ---
+$server   = "192.168.0.43"
+$database = "p2cdubuque"
+$username = "sa"
+$password = "Thugitout09!"
+$table    = "dbo.CadHandler"
+
+# --- SQL Connection ---
+$connStr = "Server=$server;Database=$database;User ID=$username;Password=$password;TrustServerCertificate=True;"
+$connection = New-Object System.Data.SqlClient.SqlConnection $connStr
+$connection.Open()
+
+# --- Query rows with NULL geog ---
+$selectCmd = $connection.CreateCommand()
+$selectCmd.CommandText = @"
+SELECT id, geox, geoy
+FROM $table
+WHERE geog IS NULL AND geox IS NOT NULL AND geoy IS NOT NULL
+"@
+$reader = $selectCmd.ExecuteReader()
+
+# --- Collect rows to update ---
+$updates = @()
+while ($reader.Read()) {
+    $id   = $reader["id"]
+    $geox = [double]$reader["geox"]
+    $geoy = [double]$reader["geoy"]
+    $updates += [PSCustomObject]@{ ID = $id; GeoX = $geox; GeoY = $geoy }
+}
+$reader.Close()
+
+# --- Python conversion function ---
+function Convert-ProjectedToLatLon {
+    param ($x, $y)
+
+    $pyCode = "from pyproj import Transformer; transformer = Transformer.from_crs('EPSG:26975', 'EPSG:4326', always_xy=True); lon, lat = transformer.transform($x, $y); print(f'{lat},{lon}')"
+    $result = python -c $pyCode
+
+    if ($result) {
+        $parts = $result.Trim().Split(",")
+        return @{ Latitude = $parts[0]; Longitude = $parts[1] }
+    } else {
+        Write-Host "Conversion failed for GeoX=$x GeoY=$y"
+        return @{ Latitude = $null; Longitude = $null }
+    }
+}
+
+# --- Update each row ---
+foreach ($row in $updates) {
+    $converted = Convert-ProjectedToLatLon -x $row.GeoX -y $row.GeoY
+    $lat = $converted.Latitude
+    $lon = $converted.Longitude
+
+    if ($lat -and $lon) {
+        $updateCmd = $connection.CreateCommand()
+        $updateCmd.CommandText = @"
+UPDATE $table
+SET geog = geography::Point($lat, $lon, 4326)
+WHERE id = $($row.ID)
+"@
+        try {
+            $updateCmd.ExecuteNonQuery()
+            Write-Host "✅ Updated geog for ID $($row.ID) → Lat=$lat, Lon=$lon"
+        } catch {
+            Write-Host "❌ SQL update failed for ID $($row.ID): $_"
+        }
+    } else {
+        Write-Host "⚠️ Skipped ID $($row.ID) due to failed conversion"
+    }
+}
+
+$connection.Close()
+Write-Host "🎯 Geog population complete using EPSG:26975 → WGS84."

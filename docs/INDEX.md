@@ -1,0 +1,11 @@
+# Documentation Index
+
+This folder contains documentation for each script and overall ETL and database schema guidance.
+
+Files:
+- `DOC-IowaDubuqueRip.md` — Iowa DOC offender list/detail scraper docs
+- `P2C-DubqueDailyBullitenRip.md` — Daily Bulletin (arrests) scraper docs
+- `P2C-DubqueRecentCallsRip.md` — CAD recent calls single-page scraper docs
+- `P2C-DubqueRecentCallsDump.md` — Resumable CAD dump importer docs
+- `Helpers-and-ETL.md` — Post-processing helpers, ETL flow, and operational notes
+- `DB-Schema.md` — Detailed table schemas and CREATE TABLE suggestions
