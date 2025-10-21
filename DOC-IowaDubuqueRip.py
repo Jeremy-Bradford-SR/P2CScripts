@@ -20,6 +20,7 @@ MSSQL_DATABASE = "p2cdubuque" # Database name updated to p2cdubque
 MSSQL_USERNAME = "sa" # e.g., "sa"
 MSSQL_PASSWORD = "Thugitout09!" # e.g., "Thugitout09!"
 MSSQL_DRIVER   = "{ODBC Driver 18 for SQL Server}" # Use 17 or 18
+
 # Proxy and URL Configurations
 PROXY_LIST_URL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
 LIST_URL = 'https://doc-search.iowa.gov/api/offender/GetOffenderListAjax'
@@ -29,9 +30,14 @@ INITIAL_BASE_SEARCH_URL = 'https://doc-search.iowa.gov/Offender/Search'
 AJAX_REFERER_URL = 'https://doc-search.iowa.gov/Offender/SearchResult?search=%7B%22FirsName%22%3Anull,%22MiddleName%22%3Anull,%22LastName%22%3Anull,%22Gender%22%3Anull,%22OffenderNumber%22%3Anull,%22Location%22%3Anull,%22Offense%22%3Anull,%22County%22%3A%2231%22,%22SearchType%22%3A%22SW%22%7D'
 PROXY_TEST_URL = 'https://doc-search.iowa.gov/Offender/Search'
 
-# Threading control variables
+# Threading control variables and shared counters
 PROXY_REFRESHER_RUNNING = True
 PROXY_LOCK = threading.Lock()
+DETAIL_STATS_LOCK = threading.Lock()
+CHARGE_STATS_LOCK = threading.Lock()
+# Counters for the final summary report
+DETAIL_STATS = {'inserted': 0, 'skipped': 0}
+CHARGE_STATS = {'inserted': 0, 'skipped': 0}
 
 
 # Random Pool of User Agents (unchanged)
@@ -69,12 +75,22 @@ LIST_BASE_DATA = {
     'start': '0'
 }
 
-# --- Utility Functions (updated for threading) ---
+# --- Utility Functions ---
 
 def status(step, message):
     """Prints a standardized, time-stamped status message for Jenkins output."""
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] [STATUS] {step}: {message}")
+
+def get_db_connection(db_conn_str):
+    """Establishes a new, isolated DB connection (required for multi-threading)."""
+    try:
+        conn = pyodbc.connect(db_conn_str)
+        return conn
+    except pyodbc.Error as ex:
+        # Since this is run per thread, we just log the failure and let the thread die
+        print(f"[ERROR] Thread failed to establish DB connection: {ex}")
+        return None
 
 def get_raw_proxies():
     """Fetches a fresh list of raw proxies from the source URL."""
@@ -118,7 +134,6 @@ def check_proxy(proxy):
     """Tests a single proxy against an HTTPS URL to validate secure tunneling capability."""
     proxies_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
     try:
-        # Use PROXY_TEST_URL (which is HTTPS) to ensure the proxy can tunnel securely.
         requests.get(PROXY_TEST_URL, proxies=proxies_dict, timeout=3, verify=False) 
         return proxy
     except requests.exceptions.RequestException:
@@ -131,7 +146,6 @@ def validate_proxies(proxies_list, target_count=100, batch_size=250):
     """
     status("Proxy Validation", f"Validating proxies in parallel (batch size {batch_size}) against HTTPS endpoint.")
     
-    # Randomly select a subset of proxies to test first
     proxies_to_check = list(proxies_list)
     random.shuffle(proxies_to_check)
     
@@ -154,11 +168,9 @@ def validate_proxies(proxies_list, target_count=100, batch_size=250):
         if len(valid_proxies) >= target_count:
             status("Proxy Validation", f"Sufficient proxies found ({len(valid_proxies)}), starting scraper and refreshing in background.")
             
-            # The next proxy to check is the one immediately after the last one processed in this batch
             next_start_index = i + len(batch) 
             return valid_proxies, next_start_index, proxies_to_check
 
-    # If the end of the list is reached without hitting the target
     return valid_proxies, len(proxies_to_check), proxies_to_check
 
 def proxy_refresher(raw_proxies_shuffled, valid_proxies_pool, initial_index):
@@ -168,12 +180,11 @@ def proxy_refresher(raw_proxies_shuffled, valid_proxies_pool, initial_index):
     """
     global PROXY_REFRESHER_RUNNING 
     current_index = initial_index
-    batch_size = 50 # Smaller batch size for continuous background checking
+    batch_size = 50 
 
     while PROXY_REFRESHER_RUNNING and current_index < len(raw_proxies_shuffled):
         batch = raw_proxies_shuffled[current_index:current_index + batch_size]
         
-        # Check proxies in batch
         with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
             results = list(executor.map(check_proxy, batch))
         
@@ -186,16 +197,14 @@ def proxy_refresher(raw_proxies_shuffled, valid_proxies_pool, initial_index):
         
         current_index += len(batch)
         
-        # Sleep to prevent busy waiting and give the main thread resources
         time.sleep(random.uniform(5, 10))
         
-    # If the end of the list is reached, log completion and exit the thread
     if current_index >= len(raw_proxies_shuffled):
         status("Refresher", "Exhausted raw proxy list. Background validation stopping.")
         PROXY_REFRESHER_RUNNING = False
 
 
-# --- Batch Insertion Functions (unchanged) ---
+# --- Batch Insertion Functions (Adapted for Single Record Insert per thread) ---
 
 def execute_single_insert_fallback(conn, cursor, sql, data_to_insert):
     """
@@ -214,15 +223,15 @@ def execute_single_insert_fallback(conn, cursor, sql, data_to_insert):
             
     return inserted, skipped
 
-def execute_batch_insert(conn, cursor, table_name, records):
-    """Executes bulk insertion using cursor.executemany()."""
+def execute_batch_insert(conn, table_name, records):
+    """Executes bulk insertion, optimized for single/small batches in a thread."""
     if not records:
         return 0, 0 # inserted, skipped
         
-    # Define column order for each table explicitly (Crucial for executemany)
-    if table_name == 'Offender_Summary':
-        columns = ['OffenderNumber', 'Name', 'Gender', 'Age']
-    elif table_name == 'Offender_Detail':
+    cursor = conn.cursor()
+    
+    # Define column order for each table explicitly
+    if table_name == 'Offender_Detail':
         columns = [
             'OffenderNumber', 'Location', 'Offense', 'TDD_SDD', 
             'CommitmentDate', 'RecallDate', 'InterviewDate', 'MandatoryMinimum', 
@@ -230,8 +239,7 @@ def execute_batch_insert(conn, cursor, table_name, records):
         ]
     elif table_name == 'Offender_Charges':
         columns = ['OffenderNumber', 'SupervisionStatus', 'OffenseClass', 'CountyOfCommitment', 'EndDate']
-    else:
-        print(f"[ERROR] Unknown table name: {table_name}")
+    else: # Offender_Summary is handled outside the thread pool
         return 0, 0
 
     # Convert list of dictionaries to list of tuples in the required column order
@@ -244,33 +252,45 @@ def execute_batch_insert(conn, cursor, table_name, records):
     inserted_count = 0
     skipped_count = 0
     
-    # Executing the batch
     try:
         cursor.executemany(sql, data_to_insert)
         inserted_count = len(records)
         conn.commit()
     except pyodbc.IntegrityError:
         conn.rollback()
-        
         # Fallback to slower, row-by-row insert to skip the duplicates gracefully.
         inserted_count, skipped_count = execute_single_insert_fallback(conn, cursor, sql, data_to_insert)
-        
+        conn.commit()
     except pyodbc.Error as ex:
-        print(f"[ERROR] Batch insertion failed for {table_name}: {ex}")
+        print(f"[ERROR] Threaded batch insertion failed for {table_name}: {ex}")
         conn.rollback()
         return 0, 0
+    finally:
+        cursor.close()
 
     return inserted_count, skipped_count
 
-# --- Core Scraper Functions (updated for threading) ---
+# --- Core Scraper Functions ---
+
+def check_detail_data_exists(cursor, offender_number):
+    """
+    Checks if the detail data (Offender_Detail and implicitly Offender_Charges) 
+    exists for the given OffenderNumber.
+    """
+    try:
+        # Check for the primary detail record
+        cursor.execute("SELECT 1 FROM Offender_Detail WHERE OffenderNumber = ?", offender_number.strip())
+        return cursor.fetchone() is not None
+    except pyodbc.Error as ex:
+        print(f"[ERROR] DB check failed for detail data existence: {ex}")
+        return False
 
 def get_fresh_session(valid_proxies):
     """
     Acquires fresh cookies and scrapes the Anti-Forgery Token from the initial base search page.
-    Returns the proxy used if successful, otherwise None.
+    Returns the session and proxy used if successful, otherwise None.
     """
     session = requests.Session()
-    # Create a local, temporary copy of the proxy list for rotation
     with PROXY_LOCK:
         proxy_pool = list(valid_proxies)
     
@@ -301,101 +321,128 @@ def get_fresh_session(valid_proxies):
                 
                 return session, proxy
         except requests.exceptions.RequestException:
-            # Suppressing specific proxy errors as requested
             pass
             
     return None, None
 
-def scrape_offender_detail(offender_number, session, valid_proxies, detail_records, charge_records):
+def scrape_offender_detail(offender_number, session, valid_proxies, db_conn_str):
     """
-    Fetches and parses the detail page, converts dates, and appends data to batch buffers.
+    Attempts to fetch and parse the detail page, retrying with all available proxies,
+    and performs immediate, isolated database insertion upon success.
     """
     detail_url = DETAIL_BASE_URL + offender_number
     
-    # Use a fresh proxy from the shared pool
+    # Establish local connection for this thread
+    conn = get_db_connection(db_conn_str)
+    if not conn:
+        return False
+
     with PROXY_LOCK:
-        proxy = random.choice(valid_proxies) if valid_proxies else None
+        proxy_pool = list(valid_proxies)
     
-    if not proxy:
-        print(f"[ERROR] Detail scrape failed for {offender_number.strip()}: No valid proxies in pool.")
-        return
-
-    proxies_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+    random.shuffle(proxy_pool)
     
-    detail_headers = HEADERS.copy()
-    detail_headers['User-Agent'] = random.choice(USER_AGENTS)
+    local_detail_data = None
+    local_charge_data = []
+
+    for proxy in proxy_pool:
+        proxies_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+        detail_headers = HEADERS.copy()
+        detail_headers['User-Agent'] = random.choice(USER_AGENTS)
+        
+        try:
+            response = session.get(detail_url, headers=detail_headers, proxies=proxies_dict, timeout=10, verify=False)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            def get_detail_value(label_text):
+                label_element = soup.find('div', class_='label', text=lambda t: t and label_text in t)
+                if label_element:
+                    data_element = label_element.find_next_sibling('div', class_='d-inline-flex')
+                    if data_element:
+                        return data_element.get_text(strip=True)
+                return None
+
+            # --- Extract Main Detail Fields ---
+            local_detail_data = {
+                'OffenderNumber': offender_number.strip(),
+                'Location': get_detail_value('Location:'),
+                'Offense': get_detail_value('Offense:'),
+                'TDD_SDD': parse_date_string(get_detail_value('TDD/SDD *:')),
+                'CommitmentDate': parse_date_string(get_detail_value('Commitment Date:')),
+                'RecallDate': parse_date_string(get_detail_value('Recall Date:')),
+                'InterviewDate': get_detail_value('Interview Date and Time (if being interviewd):'),
+                'MandatoryMinimum': get_detail_value('Mandatory Minimum (if applicable):')
+            }
+            local_detail_data['DecisionType'] = get_detail_value('Decision Type:')
+            local_detail_data['Decision'] = get_detail_value('Decision:')
+            local_detail_data['DecisionDate'] = parse_date_string(get_detail_value('Decision Date:'))
+            local_detail_data['EffectiveDate'] = parse_date_string(get_detail_value('Effective Date:'))
+
+            # --- Extract Charges Table ---
+            charges_table = soup.find('table', id='charges')
+            if charges_table:
+                rows = charges_table.find('tbody').find_all('tr')
+                for row in rows:
+                    cols = row.find_all('td')
+                    if len(cols) >= 5: 
+                        end_date_raw = cols[4].get('data-sort') or cols[4].get_text(strip=True) 
+                        charge_data = {
+                            'OffenderNumber': offender_number.strip(),
+                            'SupervisionStatus': cols[1].get_text(strip=True) or None,
+                            'OffenseClass': cols[2].get_text(strip=True) or None,
+                            'CountyOfCommitment': cols[3].get_text(strip=True) or None,
+                            'EndDate': parse_date_string(end_date_raw)
+                        }
+                        local_charge_data.append(charge_data)
+            
+            # Successfully scraped, break the proxy loop
+            break 
+        
+        except requests.exceptions.RequestException:
+            pass
+        except Exception as e:
+            print(f"[ERROR] Parsing error during detail scrape for {offender_number.strip()}: {e}")
+            break
     
-    try:
-        # We use verify=False due to frequent SSL issues with free proxies
-        response = session.get(detail_url, headers=detail_headers, proxies=proxies_dict, timeout=10, verify=False)
-        response.raise_for_status()
+    # --- THREAD-SAFE INSERTION AND COUNTER UPDATE ---
+    success = False
+    if local_detail_data:
+        # 1. Insert Detail Record (list of 1 dict)
+        d_inserted, d_skipped = execute_batch_insert(conn, 'Offender_Detail', [local_detail_data])
         
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # 2. Insert Charge Records (list of 0+ dicts)
+        c_inserted, c_skipped = execute_batch_insert(conn, 'Offender_Charges', local_charge_data)
         
-        def get_detail_value(label_text):
-            """Helper to extract text content from the detail page structure."""
-            label_element = soup.find('div', class_='label', text=lambda t: t and label_text in t)
-            if label_element:
-                data_element = label_element.find_next_sibling('div', class_='d-inline-flex')
-                if data_element:
-                    return data_element.get_text(strip=True)
-            return None
-
-        # --- Extract Main Detail Fields and CONVERT DATES ---
-        detail_data = {
-            'OffenderNumber': offender_number.strip(),
-            'Location': get_detail_value('Location:'),
-            'Offense': get_detail_value('Offense:'),
-            'TDD_SDD': parse_date_string(get_detail_value('TDD/SDD *:')),
-            'CommitmentDate': parse_date_string(get_detail_value('Commitment Date:')),
-            'RecallDate': parse_date_string(get_detail_value('Recall Date:')),
-            'InterviewDate': get_detail_value('Interview Date and Time (if being interviewd):'),
-            'MandatoryMinimum': get_detail_value('Mandatory Minimum (if applicable):')
-        }
+        # 3. Update thread-safe global counters
+        with DETAIL_STATS_LOCK:
+            DETAIL_STATS['inserted'] += d_inserted
+            DETAIL_STATS['skipped'] += d_skipped
         
-        # Extract Board Decision (nested structure)
-        detail_data['DecisionType'] = get_detail_value('Decision Type:')
-        detail_data['Decision'] = get_detail_value('Decision:')
-        # Fix: DecisionDate returns a tuple because of the trailing comma, removed in the original code.
-        detail_data['DecisionDate'] = parse_date_string(get_detail_value('Decision Date:'))
-        detail_data['EffectiveDate'] = parse_date_string(get_detail_value('Effective Date:'))
-
-        detail_records.append(detail_data)
-
-        # --- Extract Charges Table and CONVERT DATES ---
-        charges_table = soup.find('table', id='charges')
-        if charges_table:
-            rows = charges_table.find('tbody').find_all('tr')
-            for row in rows:
-                cols = row.find_all('td')
-                if len(cols) >= 5: 
-                    end_date_raw = cols[4].get('data-sort') or cols[4].get_text(strip=True) 
-                    
-                    charge_data = {
-                        'OffenderNumber': offender_number.strip(),
-                        'SupervisionStatus': cols[1].get_text(strip=True) or None,
-                        'OffenseClass': cols[2].get_text(strip=True) or None,
-                        'CountyOfCommitment': cols[3].get_text(strip=True) or None,
-                        'EndDate': parse_date_string(end_date_raw)
-                    }
-                    charge_records.append(charge_data)
-
-        time.sleep(random.uniform(1.5, 3.5)) 
+        with CHARGE_STATS_LOCK:
+            CHARGE_STATS['inserted'] += c_inserted
+            CHARGE_STATS['skipped'] += c_skipped
+            
+        success = d_inserted > 0
         
-    except requests.exceptions.RequestException as e:
-        print(f"[ERROR] Detail scrape failed for {offender_number.strip()}: {e}")
-    except Exception as e:
-        print(f"[ERROR] Unexpected error during detail scrape for {offender_number.strip()}: {e}")
+    else:
+        print(f"[ERROR] Detail scrape failed for {offender_number.strip()}: All {len(proxy_pool)} proxies exhausted.")
+    
+    # Close the thread's connection
+    conn.close()
+    return success
 
-def scrape_offender_list(session, valid_proxies):
+def scrape_offender_list(session, valid_proxies, cursor):
     """
-    Handles the pagination loop to retrieve all offender summaries with enhanced retry and recovery logic.
+    Handles the pagination loop to retrieve all offender summaries and identifies those missing details.
     """
     global PROXY_REFRESHER_RUNNING
     page_size = int(LIST_BASE_DATA['length'])
     start_index = 0
     total_records = float('inf')
-    all_offenders = []
+    offenders_missing_details = []
+    summary_records_to_insert = []
     scraped_offender_numbers = set()
     total_records_received = 0
     
@@ -407,24 +454,20 @@ def scrape_offender_list(session, valid_proxies):
         
         status("Proxy List Cycle", f"Starting list scrape using current proxy pool (Attempt {proxy_list_attempt})")
         
-        # Middle loop: Tries all proxies in the current valid_proxies list once
         while start_index < total_records:
             
             list_data = LIST_BASE_DATA.copy()
             list_data['start'] = str(start_index)
             list_data['draw'] = str((start_index // page_size) + 1)
             
-            # Inner loop: Cycles through all currently valid proxies for a single page request
             page_success = False
             
-            # --- Dynamically get pool size and shuffle for the attempt ---
             with PROXY_LOCK:
                 proxy_pool = list(valid_proxies)
             random.shuffle(proxy_pool)
             
             for proxy in proxy_pool:
                 
-                # Anti-forgery token needed in the POST body for DataTables
                 antiforgery_token_input = session.cookies.get('__RequestVerificationToken')
                 if antiforgery_token_input:
                     list_data['__RequestVerificationToken'] = antiforgery_token_input
@@ -433,7 +476,6 @@ def scrape_offender_list(session, valid_proxies):
                 list_headers['User-Agent'] = random.choice(USER_AGENTS)
 
                 try:
-                    # We use verify=False due to frequent SSL issues with free proxies
                     response = session.post(LIST_URL, data=list_data, headers=list_headers, proxies=proxies_dict, timeout=10, verify=False)
                     response.raise_for_status()
                     
@@ -451,31 +493,38 @@ def scrape_offender_list(session, valid_proxies):
                         
                     for offender in offenders:
                         offender_number_stripped = offender['OffenderNumber'].strip()
-
+                        
+                        # --- Summary and Detail Preparation Logic ---
                         if offender_number_stripped not in scraped_offender_numbers:
+                            
                             offender_summary = {
                                 'OffenderNumber': offender_number_stripped,
                                 'Name': offender['Name'].strip(),
                                 'Gender': offender['Gender'].strip(),
                                 'Age': offender['Age']
                             }
-                            all_offenders.append(offender_summary)
+                            # 1. Collect all unique summaries for insertion
+                            summary_records_to_insert.append(offender_summary)
+                            
+                            # 2. Check if Detail record ALREADY EXISTS in DB
+                            if not check_detail_data_exists(cursor, offender_number_stripped):
+                                # If details are MISSING, add to the target list
+                                offenders_missing_details.append(offender_summary)
+                                
                             scraped_offender_numbers.add(offender_number_stripped)
                     
-                    status("Progress", f"Page {list_data['draw']} successful. Unique offenders found: {len(all_offenders)}")
+                    status("Progress", f"Page {list_data['draw']} successful. Total unique found: {len(scraped_offender_numbers)}. Missing details to scrape: {len(offenders_missing_details)}")
                     page_success = True
                     break # Break inner proxy loop on success
                 
                 except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-                    # Log the generic failure, but skip detailed proxy error for cleanliness
                     if page_success == False:
                          print(f"[ERROR] List request failed on page {list_data['draw']} via proxy: {e.__class__.__name__}. Trying next proxy...")
-
-                    # --- Session Recovery Attempt (Inline) ---
+                    
                     try:
                         new_session, new_proxy_used = get_fresh_session(valid_proxies) 
                         if new_session:
-                             session = new_session # Replace the old session with the fresh one
+                             session = new_session 
                              status("Recovery", "Session successfully refreshed. Trying next proxy in pool.")
                     except Exception:
                         pass 
@@ -484,9 +533,7 @@ def scrape_offender_list(session, valid_proxies):
             
             if not page_success:
                 print(f"[ERROR] All {len(proxy_pool)} proxies failed for page {list_data['draw']}. Triggering full recovery.")
-                
-                # If we've exhausted the current pool, break the middle loop and try the next list cycle
-                start_index -= page_size # Don't advance the page, retry this page
+                start_index -= page_size
                 break 
 
             start_index += page_size
@@ -496,14 +543,13 @@ def scrape_offender_list(session, valid_proxies):
 
         if start_index >= total_records:
             status("List Fetch", "Pagination complete.")
-            break # Exit the outermost loop on success
+            break 
         
         # --- Full Recovery Logic (Phase 2: Refresh Proxy List) ---
         if proxy_list_attempt == 1:
             status("Full Recovery", "Exhausted current proxy pool. Fetching and validating a NEW proxy list.")
             new_raw_proxies = get_raw_proxies()
             if new_raw_proxies:
-                # We need to *add* to the list, not overwrite, for the background thread to keep working
                 new_valid_proxies, _, _ = validate_proxies(new_raw_proxies, target_count=50, batch_size=250)
                 if new_valid_proxies:
                     with PROXY_LOCK:
@@ -519,20 +565,29 @@ def scrape_offender_list(session, valid_proxies):
             status("FATAL Recovery", "Exhausted all recovery attempts (original and new proxy list).")
             break
 
-    status("Summary Complete", f"Total unique offender numbers acquired: {len(all_offenders)}")
-    return all_offenders, total_records_received
+    status("Summary Complete", f"Total unique offender numbers found: {len(scraped_offender_numbers)}. Details to scrape: {len(offenders_missing_details)}")
+    return offenders_missing_details, total_records_received, summary_records_to_insert
 
 # --- Main Scraper Logic ---
 def main():
-    global PROXY_REFRESHER_RUNNING # ADDED GLOBAL DECLARATION HERE
+    global PROXY_REFRESHER_RUNNING 
     
+    # --- 0. Prepare Connection String ---
+    DB_CONN_STR = (
+        f"DRIVER={MSSQL_DRIVER};"
+        f"SERVER={MSSQL_SERVER};"
+        f"DATABASE={MSSQL_DATABASE};"
+        f"UID={MSSQL_USERNAME};"
+        f"PWD={MSSQL_PASSWORD};"
+        "TrustServerCertificate=yes;"
+    )
+
     # --- 1. Proxy Setup (Initial Fetch and Validation) ---
     raw_proxies = get_raw_proxies()
     if not raw_proxies:
         print("[FATAL] Scraper aborted. Could not retrieve any raw proxies.")
         sys.exit(1)
 
-    # Initial validation (stops when 100 are found)
     valid_proxies, next_index_to_check, shuffled_raw_proxies = validate_proxies(raw_proxies)
 
     if not valid_proxies:
@@ -553,81 +608,83 @@ def main():
     else:
          status("Proxy Setup", "All raw proxies checked. No need for background refresher.")
          
-    # --- 2. Database Connection (unchanged) ---
-    status("DB Connection", "Connecting to MSSQL...")
-    conn = None
+    # --- 2. Database Connection for Summary Insert/Check ---
+    status("DB Connection", "Connecting to MSSQL for initial summary operations...")
+    conn_summary = None
     try:
-        conn_str = (
-            f"DRIVER={MSSQL_DRIVER};"
-            f"SERVER={MSSQL_SERVER};"
-            f"DATABASE={MSSQL_DATABASE};"
-            f"UID={MSSQL_USERNAME};"
-            f"PWD={MSSQL_PASSWORD};"
-            "TrustServerCertificate=yes;"
-        )
-        
-        conn = pyodbc.connect(conn_str)
-        cursor = conn.cursor()
+        conn_summary = pyodbc.connect(DB_CONN_STR)
+        cursor_summary = conn_summary.cursor()
         status("DB Connection", "Connection successful.")
     except pyodbc.Error as ex:
         print(f"[FATAL] Database connection failed: {ex}")
-        # Need to signal thread to stop here if it was running
         PROXY_REFRESHER_RUNNING = False
         sys.exit(1)
 
-    # --- 3. Session Setup & Cookie Acquisition (updated call) ---
+    # --- 3. Session Setup & Cookie Acquisition ---
     session, session_proxy = get_fresh_session(valid_proxies)
     
     if not session_proxy:
         print("[FATAL] Scraper aborted due to failure in acquiring a valid session/token.")
-        conn.close()
+        conn_summary.close()
         PROXY_REFRESHER_RUNNING = False
         sys.exit(1)
 
     # --- 4. Pagination Loop (Summary Collection) ---
-    all_offenders, total_records_received = scrape_offender_list(session, valid_proxies)
+    # offenders_to_scrape: list of summaries whose details are MISSING
+    # summary_records_to_insert: list of all unique summaries found for batch insert
+    offenders_to_scrape, total_records_found, summary_records_to_insert = scrape_offender_list(session, valid_proxies, cursor_summary)
     
     # --- 5. Batch Insert Summaries ---
-    summary_inserted, summary_skipped = execute_batch_insert(conn, cursor, 'Offender_Summary', all_offenders)
+    summary_inserted, summary_skipped = execute_batch_insert(conn_summary, 'Offender_Summary', summary_records_to_insert)
+    conn_summary.close() # Close summary connection once list is done
     status("Summary Insert", f"Inserted {summary_inserted} summaries, skipped {summary_skipped} duplicates.")
     
-    # --- 6. Scrape Details for Each Offender (Populating Buffers) ---
-    detail_records = []
-    charge_records = []
-    
-    if all_offenders:
-        status("Detail Scrape", f"Starting detail page scraping for {len(all_offenders)} unique offenders...")
+    # --- 6. Scrape Details for Each Offender (Parallel Insertion) ---
+    if offenders_to_scrape:
+        status("Detail Scrape", f"Starting parallel detail scraping for {len(offenders_to_scrape)} missing unique offenders...")
         
-        for offender in all_offenders:
-            scrape_offender_detail(offender['OffenderNumber'], session, valid_proxies, detail_records, charge_records)
+        # --- THREAD POOL EXECUTION FOR SPEED ---
+        MAX_WORKERS = 10 
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            # Pass the CONNECTION STRING (DB_CONN_STR) for each thread to open its own connection
+            futures = [executor.submit(
+                scrape_offender_detail, 
+                offender['OffenderNumber'], 
+                session, 
+                valid_proxies, 
+                DB_CONN_STR
+            ) for offender in offenders_to_scrape]
+
+            concurrent.futures.wait(futures)
+
+        status("Detail Scrape", f"Parallel scraping complete. Detail insertion results gathered.")
             
-        # --- 7. Final Batch Insert Details and Charges ---
-        detail_inserted, detail_skipped = execute_batch_insert(conn, cursor, 'Offender_Detail', detail_records)
-        charge_inserted, charge_skipped = execute_batch_insert(conn, cursor, 'Offender_Charges', charge_records)
+        # Counters are now already populated in DETAIL_STATS and CHARGE_STATS by the threads
+        detail_inserted, detail_skipped = DETAIL_STATS['inserted'], DETAIL_STATS['skipped']
+        charge_inserted, charge_skipped = CHARGE_STATS['inserted'], CHARGE_STATS['skipped']
         
         status("Detail Insert", f"Inserted {detail_inserted} detail records, skipped {detail_skipped} duplicates.")
         status("Charge Insert", f"Inserted {charge_inserted} charge records, skipped {charge_skipped} duplicates.")
     else:
-        status("Detail Scrape", "No unique offenders found to scrape details for.")
+        status("Detail Scrape", "No missing offender details found to scrape.")
         detail_inserted, detail_skipped, charge_inserted, charge_skipped = 0, 0, 0, 0
         
-    # --- 8. Final Summary and Cleanup ---
+    # --- 7. Final Summary and Cleanup ---
     status("Complete", "Scraping and insertion finished.")
     
-    # Signal the background thread to stop before cleanup
+    # Signal the background thread to stop before exit
     PROXY_REFRESHER_RUNNING = False
     
     print("\n" + "="*50)
     print("FINAL SCRAPING SUMMARY (for Jenkins Status)")
     print("="*50)
-    print(f"Total Unique Offender Records Constructed: {len(all_offenders)}")
-    print(f"Total List Records Received (across all pages): {total_records_received}")
+    print(f"Total Unique Offender Records Found in Site: {total_records_found}")
+    print(f"Offender Details Targeted for Scraping: {len(offenders_to_scrape)}")
     print(f"Offender Summary - Inserted: {summary_inserted}, Skipped: {summary_skipped}")
     print(f"Offender Detail - Inserted: {detail_inserted}, Skipped: {detail_skipped}")
     print(f"Offender Charges - Inserted: {charge_inserted}, Skipped: {charge_skipped}")
     print("="*50 + "\n")
 
-    conn.close()
     status("Cleanup", "Database connection closed. Exiting with success code.")
     
     sys.exit(0)
