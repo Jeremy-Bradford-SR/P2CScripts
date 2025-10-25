@@ -41,17 +41,15 @@ def check_proxy(proxy):
     except:
         return None
 
-def validate_proxies(proxies_list, batch_size=20):
+def validate_proxies(proxies_list, batch_size=250): # Changed default batch_size to 250
     random.shuffle(proxies_list)
     valid_proxies = []
-    for i in range(0, min(len(proxies_list), 100), batch_size):
+    for i in range(0, len(proxies_list), batch_size): # Iterate through all proxies
         batch = proxies_list[i:i + batch_size]
         with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
             results = list(executor.map(check_proxy, batch))
         valid_batch = [proxy for proxy in results if proxy]
         valid_proxies.extend(valid_batch)
-        if valid_proxies:
-            break
     return valid_proxies
 
 # --- Step 1: Fetch proxy list ---
@@ -123,31 +121,56 @@ headers = {
 cookies = {"ASP.NET_SessionId": session_id}
 
 # --- Step 5: Try proxies for data ---
-status("Data Request", "Attempting data fetch via proxies")
-data_resp = None
-for proxy in valid_proxies:
-    headers["User-Agent"] = random.choice(USER_AGENTS)
-    proxies_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
-    try:
-        r = requests.post(DATA_URL, data=payload, headers=headers, cookies=cookies, proxies=proxies_dict, timeout=2)
-        r.raise_for_status()
-        data_resp = r
-        status("Data Request", f"Success with proxy: {proxy}")
-        break
-    except Exception as e:
-        print(f"[WARN] Proxy {proxy} failed for data: {e}")
+status("Data Request", "Starting paginated data fetch")
+all_rows = []
+page_num = 1
 
-if data_resp is None:
-    status("Data Request", "All proxies failed, trying direct")
-    headers["User-Agent"] = random.choice(USER_AGENTS)
-    r = requests.post(DATA_URL, data=payload, headers=headers, cookies=cookies, timeout=10)
-    r.raise_for_status()
-    data_resp = r
+while True:
+    payload['page'] = page_num
+    status("Data Request", f"Fetching page {page_num}")
+
+    page_resp = None
+    page_rows = []
+
+    # Try with proxies first
+    for proxy in valid_proxies:
+        headers["User-Agent"] = random.choice(USER_AGENTS)
+        proxies_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
+        try:
+            r = requests.post(DATA_URL, data=payload, headers=headers, cookies=cookies, proxies=proxies_dict, timeout=5)
+            r.raise_for_status()
+            data = r.json()
+            page_rows = data.get("rows", [])
+            page_resp = r
+            status("Data Request", f"Page {page_num} success with proxy: {proxy}")
+            break # Success, move to next page
+        except Exception as e:
+            print(f"[WARN] Proxy {proxy} failed for page {page_num}: {e}")
+
+    # Fallback to direct connection if all proxies fail for this page
+    if page_resp is None:
+        status("Data Request", f"All proxies failed for page {page_num}, trying direct")
+        headers["User-Agent"] = random.choice(USER_AGENTS)
+        try:
+            r = requests.post(DATA_URL, data=payload, headers=headers, cookies=cookies, timeout=10)
+            r.raise_for_status()
+            page_rows = r.json().get("rows", [])
+            page_resp = r
+        except Exception as e:
+            print(f"[ERROR] Direct request for page {page_num} also failed: {e}. Stopping.")
+            break # Stop pagination on hard failure
+
+    if not page_rows:
+        status("Data Request", "Last page reached. No more records.")
+        break
+
+    all_rows.extend(page_rows)
+    page_num += 1
+    time.sleep(random.uniform(0.5, 1.5)) # Be polite between page requests
 
 # --- Step 6: Process JSON ---
-data = data_resp.json()
-rows = data.get("rows", [])
-status("Data Processing", f"Retrieved {len(rows)} rows")
+rows = all_rows # Use the aggregated list of rows
+status("Data Processing", f"Retrieved {len(rows)} total rows from {page_num - 1} pages")
 
 if not rows:
     print("[ERROR] No rows retrieved. Exiting with failure code.")
