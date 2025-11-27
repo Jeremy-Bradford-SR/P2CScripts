@@ -8,12 +8,17 @@ import sys
 import concurrent.futures
 import threading
 from datetime import datetime, timedelta
+import argparse
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- CONFIGURATION ---
-MSSQL_SERVER   = "192.168.0.211"
-MSSQL_DATABASE = "p2cdubuque"
-MSSQL_USERNAME = "sa"
-MSSQL_PASSWORD = "Thugitout09!"
+MSSQL_SERVER   = os.getenv("MSSQL_SERVER")
+MSSQL_DATABASE = os.getenv("MSSQL_DATABASE")
+MSSQL_USERNAME = os.getenv("MSSQL_USERNAME")
+MSSQL_PASSWORD = os.getenv("MSSQL_PASSWORD")
 MSSQL_DRIVER   = "{ODBC Driver 18 for SQL Server}"
 
 DATA_URL = "http://p2c.cityofdubuque.org/jqHandler.ashx?op=s"
@@ -22,10 +27,11 @@ DAILY_BULLETIN_URL = "http://p2c.cityofdubuque.org/dailybulletin.aspx"
 PROXY_LIST_URL = "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
 
 # --- DATE & CONCURRENCY CONFIGURATION ---
-# This script will scrape for the last 7 days, including today.
-DAYS_TO_SCRAPE = 90
-MAX_WORKERS = 14 # Number of threads to run in parallel
-CHUNK_SIZE = 14 # Process 7 days at a time
+# Default values (can be overridden by command line arguments)
+DEFAULT_DAYS_TO_SCRAPE = 7
+DEFAULT_MAX_WORKERS = 7 # Number of threads to run in parallel
+DEFAULT_CHUNK_SIZE = 7 # Process 7 days at a time
+MAX_RETRIES_PER_DAY = 5 # Number of times to retry a day with a fresh proxy if it fails
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -73,7 +79,7 @@ def validate_proxies(proxies_list, batch_size=100):
             results = list(executor.map(check_proxy, batch))
         valid_batch = [proxy for proxy in results if proxy]
         valid_proxies.extend(valid_batch)
-        if len(valid_proxies) >= 50: # Stop if we have a decent number
+        if len(valid_proxies) >= 1000: # Stop if we have a decent number
             break
     return valid_proxies
 
@@ -111,125 +117,150 @@ def daterange(start_date, end_date):
 def process_day(current_date, existing_ids, valid_proxies):
     """
     Scrapes all pages for a single day and inserts new records into the database.
+    Retries with a fresh proxy if a critical failure occurs.
     """
     global total_inserted, total_skipped
 
     date_str = current_date.strftime("%m/%d/%Y")
     thread_name = threading.current_thread().name
-    status(thread_name, f"Starting date: {date_str}")
-
-    conn_str = f"DRIVER={MSSQL_DRIVER};SERVER={MSSQL_SERVER};DATABASE={MSSQL_DATABASE};UID={MSSQL_USERNAME};PWD={MSSQL_PASSWORD};TrustServerCertificate=yes;"
-    try:
-        conn = pyodbc.connect(conn_str)
-        cursor = conn.cursor()
-    except pyodbc.Error as e:
-        status(thread_name, f"FATAL: Could not connect to DB. Aborting thread. Error: {e}")
-        return
-
-    current_user_agent = random.choice(USER_AGENTS)
-    session, proxy_in_use = get_fresh_session(current_user_agent, valid_proxies)
-
-    if not session:
-        status(thread_name, f"FATAL: Could not get a session for {date_str}. Aborting this day.")
-        conn.close()
-        return
     
-    if proxy_in_use:
-        status(thread_name, f"Acquired fresh session for {date_str} using proxy {proxy_in_use}")
-    else:
-        status(thread_name, f"Acquired fresh session for {date_str} using a direct connection.")
+    conn_str = f"DRIVER={MSSQL_DRIVER};SERVER={MSSQL_SERVER};DATABASE={MSSQL_DATABASE};UID={MSSQL_USERNAME};PWD={MSSQL_PASSWORD};TrustServerCertificate=yes;"
 
-    # Define headers once, to be used for all subsequent requests in this thread.
-    headers = { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Origin": "http://p2c.cityofdubuque.org", "Referer": "http://p2c.cityofdubuque.org/dailybulletin.aspx", "X-Requested-With": "XMLHttpRequest", "User-Agent": current_user_agent }
-
-    # --- CORRECTED SESSION INITIALIZATION FLOW ---
-    try:
-        # Step 1: GET the bulletin page to scrape hidden form fields
-        get_headers = {'User-Agent': current_user_agent, 'Referer': SESSION_INIT_URL}
-        proxies_dict = {"http": proxy_in_use, "https": proxy_in_use} if proxy_in_use else None
+    for attempt in range(1, MAX_RETRIES_PER_DAY + 1):
+        status(thread_name, f"Starting date: {date_str} (Attempt {attempt}/{MAX_RETRIES_PER_DAY})")
         
-        form_page_resp = session.get(DAILY_BULLETIN_URL, headers=get_headers, proxies=proxies_dict, timeout=15)
-        form_page_resp.raise_for_status()
-        soup = BeautifulSoup(form_page_resp.text, 'html.parser')
-
-        # Step 2: Manually build the form data as a raw string to prevent URL encoding of the date.
-        # This is the definitive fix for the server ignoring the date change.
-        viewstate = quote_plus(soup.find('input', {'name': '__VIEWSTATE'}).get('value', ''))
-        viewstategen = quote_plus(soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value', ''))
-        eventvalidation = quote_plus(soup.find('input', {'name': '__EVENTVALIDATION'}).get('value', ''))
-
-        raw_form_data = (
-            f"__EVENTTARGET=MasterPage%24mainContent%24lbUpdate&__VIEWSTATE={viewstate}&__VIEWSTATEGENERATOR={viewstategen}"
-            f"&__EVENTVALIDATION={eventvalidation}&MasterPage%24mainContent%24ddlType2=AL&MasterPage%24mainContent%24txtDate2={quote_plus(date_str)}"
-        )
-
-        # Step 3: POST back to the bulletin page to set the date on the server
-        post_headers = {'User-Agent': current_user_agent, 'Referer': DAILY_BULLETIN_URL, 'Content-Type': 'application/x-www-form-urlencoded'}
-        set_date_resp = session.post(DAILY_BULLETIN_URL, data=raw_form_data, headers=post_headers, proxies=proxies_dict, timeout=20)
-        set_date_resp.raise_for_status()
-
-    except requests.RequestException as e:
-        status(thread_name, f"Failed to initialize form for {date_str}: {e}. Aborting this day.")
-        return
-
-    page_num = 1
-    daily_inserted, daily_skipped = 0, 0
-
-    while True:
-        payload = { "t": "db", "d": date_str, "_search": "false", "nd": int(time.time() * 1000), "rows": 10000, "page": page_num, "sidx": "case", "sord": "asc" } # Request max rows
-        proxies_dict = {"http": proxy_in_use, "https": proxy_in_use} if proxy_in_use else None
-        
-        page_data = None
         try:
-            # Use the SAME session object that was used to set the date.
-            r = session.post(DATA_URL, data=payload, headers=headers, proxies=proxies_dict, timeout=20)
-            r.raise_for_status()
-            page_data = r.json()
-        except requests.RequestException as e:
-            status(thread_name, f"Data request failed for {date_str} page {page_num}: {e}. Stopping work on this day.")
-            break
+            conn = pyodbc.connect(conn_str)
+            cursor = conn.cursor()
+        except pyodbc.Error as e:
+            status(thread_name, f"FATAL: Could not connect to DB. Aborting thread. Error: {e}")
+            return # DB error is likely fatal for all retries, or we could retry, but usually it's config
 
-        rows = page_data.get("rows", [])
+        current_user_agent = random.choice(USER_AGENTS)
+        session, proxy_in_use = get_fresh_session(current_user_agent, valid_proxies)
 
-        if not rows:
-            break # No more rows on this page, so we're done with this date.
+        if not session:
+            status(thread_name, f"FATAL: Could not get a session for {date_str}. Retrying...")
+            conn.close()
+            continue # Retry loop
+        
+        if proxy_in_use:
+            status(thread_name, f"Acquired fresh session for {date_str} using proxy {proxy_in_use}")
+        else:
+            status(thread_name, f"Acquired fresh session for {date_str} using a direct connection.")
 
-        for record in rows:
-            try:
-                # Treat the ID as a string to prevent overflow errors.
-                rec_id = str(record.get('id', '') or '').strip()
-            except (ValueError, TypeError):
-                daily_skipped += 1
-                continue # Skip records with invalid IDs
+        # Define headers once, to be used for all subsequent requests in this thread.
+        headers = { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Origin": "http://p2c.cityofdubuque.org", "Referer": "http://p2c.cityofdubuque.org/dailybulletin.aspx", "X-Requested-With": "XMLHttpRequest", "User-Agent": current_user_agent }
 
-            with data_lock:
-                if rec_id in existing_ids:
-                    daily_skipped += 1
-                    continue
-                existing_ids.add(rec_id)
+        # --- CORRECTED SESSION INITIALIZATION FLOW ---
+        try:
+            # Step 1: GET the bulletin page to scrape hidden form fields
+            get_headers = {'User-Agent': current_user_agent, 'Referer': SESSION_INIT_URL}
+            proxies_dict = {"http": proxy_in_use, "https": proxy_in_use} if proxy_in_use else None
             
+            form_page_resp = session.get(DAILY_BULLETIN_URL, headers=get_headers, proxies=proxies_dict, timeout=15)
+            form_page_resp.raise_for_status()
+            soup = BeautifulSoup(form_page_resp.text, 'html.parser')
+
+            # Step 2: Manually build the form data as a raw string to prevent URL encoding of the date.
+            # This is the definitive fix for the server ignoring the date change.
+            viewstate = quote_plus(soup.find('input', {'name': '__VIEWSTATE'}).get('value', ''))
+            viewstategen = quote_plus(soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value', ''))
+            eventvalidation = quote_plus(soup.find('input', {'name': '__EVENTVALIDATION'}).get('value', ''))
+
+            raw_form_data = (
+                f"__EVENTTARGET=MasterPage%24mainContent%24lbUpdate&__VIEWSTATE={viewstate}&__VIEWSTATEGENERATOR={viewstategen}"
+                f"&__EVENTVALIDATION={eventvalidation}&MasterPage%24mainContent%24ddlType2=AL&MasterPage%24mainContent%24txtDate2={quote_plus(date_str)}"
+            )
+
+            # Step 3: POST back to the bulletin page to set the date on the server
+            post_headers = {'User-Agent': current_user_agent, 'Referer': DAILY_BULLETIN_URL, 'Content-Type': 'application/x-www-form-urlencoded'}
+            set_date_resp = session.post(DAILY_BULLETIN_URL, data=raw_form_data, headers=post_headers, proxies=proxies_dict, timeout=20)
+            set_date_resp.raise_for_status()
+
+        except requests.RequestException as e:
+            status(thread_name, f"Failed to initialize form for {date_str}: {e}. Retrying...")
+            conn.close()
+            continue # Retry loop
+
+        page_num = 1
+        daily_inserted, daily_skipped = 0, 0
+        day_success = True
+
+        while True:
+            payload = { "t": "db", "d": date_str, "_search": "false", "nd": int(time.time() * 1000), "rows": 10000, "page": page_num, "sidx": "case", "sord": "asc" } # Request max rows
+            proxies_dict = {"http": proxy_in_use, "https": proxy_in_use} if proxy_in_use else None
+            
+            page_data = None
             try:
-                insert_sql = "INSERT INTO dbo.DailyBulletinArrests (invid, [key], location, id, name, crime, [time], property, officer, [case], description, race, sex, lastname, firstname, charge, middlename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                cursor.execute(insert_sql, (record.get("invid"), record.get("key"), record.get("location"), rec_id, record.get("name"), record.get("crime"), record.get("time"), record.get("property"), record.get("officer"), record.get("case"), record.get("description"), record.get("race"), record.get("sex"), record.get("lastname"), record.get("firstname"), record.get("charge"), record.get("middlename")))
-                daily_inserted += 1
-            except pyodbc.Error as db_err:
-                status(thread_name, f"[WARN] DB insert failed for ID {rec_id}. Error: {db_err}")
-                daily_skipped += 1 
-                continue
+                # Use the SAME session object that was used to set the date.
+                r = session.post(DATA_URL, data=payload, headers=headers, proxies=proxies_dict, timeout=20)
+                r.raise_for_status()
+                page_data = r.json()
+            except requests.RequestException as e:
+                status(thread_name, f"Data request failed for {date_str} page {page_num}: {e}. Retrying day...")
+                day_success = False
+                break # Break inner loop to retry the day
 
-        conn.commit()
-        page_num += 1
-        time.sleep(0.5) # Be polite between page requests
+            rows = page_data.get("rows", [])
 
-    with data_lock:
-        total_inserted += daily_inserted
-        total_skipped += daily_skipped
+            if not rows:
+                break # No more rows on this page, so we're done with this date.
 
-    status(thread_name, f"Finished {date_str}. Inserted: {daily_inserted}, Skipped: {daily_skipped}")
-    conn.close()
+            for record in rows:
+                try:
+                    # Treat the ID as a string to prevent overflow errors.
+                    rec_id = str(record.get('id', '') or '').strip()
+                except (ValueError, TypeError):
+                    daily_skipped += 1
+                    continue # Skip records with invalid IDs
+
+                with data_lock:
+                    if rec_id in existing_ids:
+                        daily_skipped += 1
+                        continue
+                    existing_ids.add(rec_id)
+                
+                try:
+                    insert_sql = "INSERT INTO dbo.DailyBulletinArrests (invid, [key], location, id, name, crime, [time], property, officer, [case], description, race, sex, lastname, firstname, charge, middlename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    cursor.execute(insert_sql, (record.get("invid"), record.get("key"), record.get("location"), rec_id, record.get("name"), record.get("crime"), record.get("time"), record.get("property"), record.get("officer"), record.get("case"), record.get("description"), record.get("race"), record.get("sex"), record.get("lastname"), record.get("firstname"), record.get("charge"), record.get("middlename")))
+                    daily_inserted += 1
+                except pyodbc.Error as db_err:
+                    status(thread_name, f"[WARN] DB insert failed for ID {rec_id}. Error: {db_err}")
+                    daily_skipped += 1 
+                    continue
+
+            conn.commit()
+            page_num += 1
+            time.sleep(0.5) # Be polite between page requests
+
+        if day_success:
+            with data_lock:
+                total_inserted += daily_inserted
+                total_skipped += daily_skipped
+
+            status(thread_name, f"Finished {date_str}. Inserted: {daily_inserted}, Skipped: {daily_skipped}")
+            conn.close()
+            return # Success, exit function
+        else:
+            conn.close()
+            # Loop continues to next attempt
+
+    status(thread_name, f"FATAL: Failed to process {date_str} after {MAX_RETRIES_PER_DAY} attempts.")
 
 # --- MAIN EXECUTION BLOCK ---
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="P2C Scraper")
+    parser.add_argument("--DAYS_TO_SCRAPE", type=int, default=DEFAULT_DAYS_TO_SCRAPE, help="Number of days to scrape")
+    parser.add_argument("--MAX_WORKERS", type=int, default=DEFAULT_MAX_WORKERS, help="Number of worker threads")
+    parser.add_argument("--CHUNK_SIZE", type=int, default=DEFAULT_CHUNK_SIZE, help="Number of days per batch")
+    args = parser.parse_args()
+
+    DAYS_TO_SCRAPE = args.DAYS_TO_SCRAPE
+    MAX_WORKERS = args.MAX_WORKERS
+    CHUNK_SIZE = args.CHUNK_SIZE
+
+    status("Main", f"Configuration: Days={DAYS_TO_SCRAPE}, Workers={MAX_WORKERS}, ChunkSize={CHUNK_SIZE}")
     status("Main", "Fetching and validating proxy list...")
     try:
         proxy_resp = requests.get(PROXY_LIST_URL, timeout=10)

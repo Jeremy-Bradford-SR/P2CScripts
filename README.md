@@ -1,28 +1,48 @@
-
 # Dubuque P2C & DOC Scrapers
 
 This repository contains scripts for scraping Dubuque P2C endpoints and Iowa DOC offender search and loading the data into an MSSQL database.
 
-Quick list of scripts
-- `DOC-IowaDubuqueRip.py` — DOC offender list/detail scraper
-- `P2C-DubqueDailyBullitenRip.py` — Daily Bulletin (arrests) scraper
-- `P2C-DubqueRecentCallsRip.py` — CAD recent calls scraper (single page)
+## Key Features
+*   **Centralized Configuration**: Uses `.env` file for secure database credentials.
+*   **Robust Proxy Handling**: Validates proxies against reliable targets and rotates them to avoid blocking.
+*   **Session Management**: Handles ASP.NET session cookies and Anti-Forgery tokens automatically.
+*   **Parallel Processing**: Uses threading to speed up list and detail scraping (especially for DOC data).
+*   **Resilience**: Implements retry logic for network requests and database connections.
+
+## Scripts
+- `DOC-IowaDubuqueRip.py` — DOC offender list/detail scraper (Parallelized, Robust)
+- `P2C-DubqueDailyBulletinRip.py` — Daily Bulletin (arrests) scraper (Retry logic, Configurable days)
+- `P2C-DubqueRecentCallsRip.py` — CAD recent calls scraper (Robust session handling)
 - `P2C-DubqueRecentCallsDump.py` — Resumable CAD dump importer
 - `UpdateDAB-TimetoEventTime.py` / `UpdateDBA-Eventtime.ps1` — Convert raw `time` text to `event_time` DATETIME
 - `UpdateCADHandler-GeoG.ps1` — Convert geox/geoy (EPSG:26975) to WGS84 `geog`
 - `P2C-DubuqueDatabaseBackup.ps1` — SQL Server backup/prune helper
 
-Prerequisites
+## Prerequisites
 - Python 3.8+
-- Python packages: `requests`, `beautifulsoup4`, `pyodbc` (plus `pyproj` for coordinate conversion)
 - ODBC Driver for SQL Server (17 or 18)
 
-Configuration
-- Update MSSQL_* constants in each script OR set credentials via environment variables (recommended for production).
+## Installation
+1.  Clone the repository.
+2.  Install Python dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
 
-Documentation
+## Configuration
+1.  Create a `.env` file in the root directory (copy from a template if available, or create new).
+2.  Add your MSSQL database credentials:
+    ```env
+    MSSQL_SERVER="your_server_ip"
+    MSSQL_DATABASE="your_database_name"
+    MSSQL_USERNAME="your_username"
+    MSSQL_PASSWORD="your_password"
+    ```
+
+## Documentation
 - Detailed per-script documentation, ETL notes, and schema samples live under `docs/` (see `docs/INDEX.md`).
 
-Operational notes
-- The scrapers use public proxies and user-agent rotation to reduce the chance of being blocked; this is imperfect. For reliable long-term ingestion, run from a static IP or use a dedicated proxy/VPN with controlled rate limiting.
-
+## Operational Notes
+- The scrapers use public proxies and user-agent rotation to reduce the chance of being blocked.
+- For `DOC-IowaDubuqueRip.py`, the script now pre-loads existing IDs to minimize database hits and uses parallel workers for faster scraping.
+- `P2C` scripts now include command-line arguments for flexibility (e.g., `--rows`, `--days`).

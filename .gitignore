@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+sql_debug.log
+event_time_debug.log

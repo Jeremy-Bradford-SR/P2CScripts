@@ -5,12 +5,16 @@ import pyodbc
 import sys
 import concurrent.futures
 from datetime import datetime
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- CONFIG ---
-MSSQL_SERVER   = "192.168.0.43"
-MSSQL_DATABASE = "p2cdubuque"
-MSSQL_USERNAME = "sa"
-MSSQL_PASSWORD = "Thugitout09!"
+MSSQL_SERVER   = os.getenv("MSSQL_SERVER")
+MSSQL_DATABASE = os.getenv("MSSQL_DATABASE")
+MSSQL_USERNAME = os.getenv("MSSQL_USERNAME")
+MSSQL_PASSWORD = os.getenv("MSSQL_PASSWORD")
 MSSQL_DRIVER   = "{ODBC Driver 18 for SQL Server}"
 
 CAD_URL = "http://p2c.cityofdubuque.org/cad/cadHandler.ashx?op=s"
@@ -32,15 +36,17 @@ def status(step_name, message):
     print(f"[{ts}] [STATUS] {step_name}: {message}")
 
 def check_proxy(proxy):
+    """Tests a single proxy against a reliable target."""
     test_url = "http://example.com"
     proxies_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
     try:
-        requests.get(test_url, proxies=proxies_dict, timeout=2)
+        requests.get(test_url, proxies=proxies_dict, timeout=3)
         return proxy
     except:
         return None
 
 def validate_proxies(proxies_list, batch_size=100):
+    """Validates a list of proxies in parallel to find working ones."""
     random.shuffle(proxies_list)
     valid_proxies = []
     for i in range(0, len(proxies_list), batch_size):
@@ -49,7 +55,7 @@ def validate_proxies(proxies_list, batch_size=100):
             results = list(executor.map(check_proxy, batch))
         valid_batch = [proxy for proxy in results if proxy]
         valid_proxies.extend(valid_batch)
-        if valid_proxies:
+        if len(valid_proxies) >= 1000: # Stop if we have a decent number
             break
     return valid_proxies
 
@@ -61,16 +67,8 @@ status("Proxy Fetch", "Fetching proxy list")
 try:
     proxy_resp = requests.get(PROXY_LIST_URL, timeout=10)
     proxy_resp.raise_for_status()
-    proxies_list = []
-    for line in proxy_resp.text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if "://" in line:
-            line = line.split("://", 1)[1]
-        ip_only = line.split(":")[0]
-        proxies_list.append(ip_only)
-    status("Proxy Fetch", f"Retrieved {len(proxies_list)} proxies")
+    proxies_list = [line.split("://")[-1].strip() for line in proxy_resp.text.splitlines() if line.strip()]
+    status("Proxy Fetch", f"Retrieved {len(proxies_list)} raw proxies")
 except Exception as e:
     print(f"[WARN] Could not fetch proxy list: {e}")
     sys.exit(1)
