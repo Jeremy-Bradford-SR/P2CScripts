@@ -14,6 +14,7 @@ This repository contains scripts for scraping Dubuque P2C endpoints and Iowa DOC
 - `P2C-DubqueDailyBulletinRip.py` — Daily Bulletin (arrests) scraper (Retry logic, Configurable days)
 - `P2C-DubqueRecentCallsRip.py` — CAD recent calls scraper (Robust session handling)
 - `P2C-DubqueRecentCallsDump.py` — Resumable CAD dump importer
+- `P2C-SexOffenderParser.py` — Iowa Sex Offender Registry scraper (Proxies, Photos, Upsert)
 - `UpdateDAB-TimetoEventTime.py` / `UpdateDBA-Eventtime.ps1` — Convert raw `time` text to `event_time` DATETIME
 - `UpdateCADHandler-GeoG.ps1` — Convert geox/geoy (EPSG:26975) to WGS84 `geog`
 - `P2C-DubuqueDatabaseBackup.ps1` — SQL Server backup/prune helper
