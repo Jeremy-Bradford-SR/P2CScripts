@@ -6,7 +6,8 @@
 ## Endpoint
 - URL: `http://p2c.cityofdubuque.org/jqHandler.ashx?op=s`
 - The endpoint expects a POST with form-encoded parameters resembling jqGrid/DataTables requests (t, _search, nd, rows, page, sidx, sord).
-- The site uses ASP.NET session cookies (`ASP.NET_SessionId`) so the script first requests `dailybulletin.aspx` to obtain a session cookie. This may be done via proxies or direct connection.
+- The site uses ASP.NET session cookies (`ASP.NET_SessionId`) so the script first requests `dailybulletin.aspx` to obtain a session cookie.
+- **Report Types**: The script explicitly iterates through four report types (`AR`, `TC`, `LW`, `TA`) for each day to ensure all records are retrieved, as the default "ALL" view (`AL`) is known to be incomplete.
 
 ## Request details
 - Headers used:

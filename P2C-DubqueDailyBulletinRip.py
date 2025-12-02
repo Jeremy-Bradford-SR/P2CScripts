@@ -152,87 +152,95 @@ def process_day(current_date, existing_ids, valid_proxies):
         # Define headers once, to be used for all subsequent requests in this thread.
         headers = { "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8", "Origin": "http://p2c.cityofdubuque.org", "Referer": "http://p2c.cityofdubuque.org/dailybulletin.aspx", "X-Requested-With": "XMLHttpRequest", "User-Agent": current_user_agent }
 
-        # --- CORRECTED SESSION INITIALIZATION FLOW ---
-        try:
-            # Step 1: GET the bulletin page to scrape hidden form fields
-            get_headers = {'User-Agent': current_user_agent, 'Referer': SESSION_INIT_URL}
-            proxies_dict = {"http": proxy_in_use, "https": proxy_in_use} if proxy_in_use else None
-            
-            form_page_resp = session.get(DAILY_BULLETIN_URL, headers=get_headers, proxies=proxies_dict, timeout=15)
-            form_page_resp.raise_for_status()
-            soup = BeautifulSoup(form_page_resp.text, 'html.parser')
-
-            # Step 2: Manually build the form data as a raw string to prevent URL encoding of the date.
-            # This is the definitive fix for the server ignoring the date change.
-            viewstate = quote_plus(soup.find('input', {'name': '__VIEWSTATE'}).get('value', ''))
-            viewstategen = quote_plus(soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value', ''))
-            eventvalidation = quote_plus(soup.find('input', {'name': '__EVENTVALIDATION'}).get('value', ''))
-
-            raw_form_data = (
-                f"__EVENTTARGET=MasterPage%24mainContent%24lbUpdate&__VIEWSTATE={viewstate}&__VIEWSTATEGENERATOR={viewstategen}"
-                f"&__EVENTVALIDATION={eventvalidation}&MasterPage%24mainContent%24ddlType2=AL&MasterPage%24mainContent%24txtDate2={quote_plus(date_str)}"
-            )
-
-            # Step 3: POST back to the bulletin page to set the date on the server
-            post_headers = {'User-Agent': current_user_agent, 'Referer': DAILY_BULLETIN_URL, 'Content-Type': 'application/x-www-form-urlencoded'}
-            set_date_resp = session.post(DAILY_BULLETIN_URL, data=raw_form_data, headers=post_headers, proxies=proxies_dict, timeout=20)
-            set_date_resp.raise_for_status()
-
-        except requests.RequestException as e:
-            status(thread_name, f"Failed to initialize form for {date_str}: {e}. Retrying...")
-            conn.close()
-            continue # Retry loop
-
-        page_num = 1
+        # Iterate through specific types to ensure we get all records (AL is known to miss TA records)
+        REPORT_TYPES = ['AR', 'TC', 'LW', 'TA']
+        
         daily_inserted, daily_skipped = 0, 0
         day_success = True
 
-        while True:
-            payload = { "t": "db", "d": date_str, "_search": "false", "nd": int(time.time() * 1000), "rows": 10000, "page": page_num, "sidx": "case", "sord": "asc" } # Request max rows
-            proxies_dict = {"http": proxy_in_use, "https": proxy_in_use} if proxy_in_use else None
+        for report_type in REPORT_TYPES:
+            status(thread_name, f"Processing {date_str} - Type: {report_type}")
             
-            page_data = None
             try:
-                # Use the SAME session object that was used to set the date.
-                r = session.post(DATA_URL, data=payload, headers=headers, proxies=proxies_dict, timeout=20)
-                r.raise_for_status()
-                page_data = r.json()
+                # Step 1: GET the bulletin page to scrape hidden form fields (Fresh ViewState for each type change)
+                get_headers = {'User-Agent': current_user_agent, 'Referer': SESSION_INIT_URL}
+                proxies_dict = {"http": proxy_in_use, "https": proxy_in_use} if proxy_in_use else None
+                
+                form_page_resp = session.get(DAILY_BULLETIN_URL, headers=get_headers, proxies=proxies_dict, timeout=15)
+                form_page_resp.raise_for_status()
+                soup = BeautifulSoup(form_page_resp.text, 'html.parser')
+
+                # Step 2: Manually build the form data
+                viewstate = quote_plus(soup.find('input', {'name': '__VIEWSTATE'}).get('value', ''))
+                viewstategen = quote_plus(soup.find('input', {'name': '__VIEWSTATEGENERATOR'}).get('value', ''))
+                eventvalidation = quote_plus(soup.find('input', {'name': '__EVENTVALIDATION'}).get('value', ''))
+
+                raw_form_data = (
+                    f"__EVENTTARGET=MasterPage%24mainContent%24lbUpdate&__VIEWSTATE={viewstate}&__VIEWSTATEGENERATOR={viewstategen}"
+                    f"&__EVENTVALIDATION={eventvalidation}&MasterPage%24mainContent%24ddlType2={report_type}&MasterPage%24mainContent%24txtDate2={quote_plus(date_str)}"
+                )
+
+                # Step 3: POST back to set the date and type
+                post_headers = {'User-Agent': current_user_agent, 'Referer': DAILY_BULLETIN_URL, 'Content-Type': 'application/x-www-form-urlencoded'}
+                set_date_resp = session.post(DAILY_BULLETIN_URL, data=raw_form_data, headers=post_headers, proxies=proxies_dict, timeout=20)
+                set_date_resp.raise_for_status()
+
             except requests.RequestException as e:
-                status(thread_name, f"Data request failed for {date_str} page {page_num}: {e}. Retrying day...")
+                status(thread_name, f"Failed to initialize form for {date_str} Type {report_type}: {e}. Retrying day...")
                 day_success = False
-                break # Break inner loop to retry the day
+                break # Break type loop, trigger day retry
 
-            rows = page_data.get("rows", [])
-
-            if not rows:
-                break # No more rows on this page, so we're done with this date.
-
-            for record in rows:
+            page_num = 1
+            type_done = False
+            
+            while True:
+                payload = { "t": "db", "d": date_str, "_search": "false", "nd": int(time.time() * 1000), "rows": 10000, "page": page_num, "sidx": "case", "sord": "asc" }
+                proxies_dict = {"http": proxy_in_use, "https": proxy_in_use} if proxy_in_use else None
+                
+                page_data = None
                 try:
-                    # Treat the ID as a string to prevent overflow errors.
-                    rec_id = str(record.get('id', '') or '').strip()
-                except (ValueError, TypeError):
-                    daily_skipped += 1
-                    continue # Skip records with invalid IDs
+                    r = session.post(DATA_URL, data=payload, headers=headers, proxies=proxies_dict, timeout=20)
+                    r.raise_for_status()
+                    page_data = r.json()
+                except requests.RequestException as e:
+                    status(thread_name, f"Data request failed for {date_str} Type {report_type} page {page_num}: {e}. Retrying day...")
+                    day_success = False
+                    break # Break page loop
 
-                with data_lock:
-                    if rec_id in existing_ids:
+                rows = page_data.get("rows", [])
+
+                if not rows:
+                    type_done = True
+                    break # No more rows for this type
+
+                for record in rows:
+                    try:
+                        rec_id = str(record.get('id', '') or '').strip()
+                    except (ValueError, TypeError):
                         daily_skipped += 1
                         continue
-                    existing_ids.add(rec_id)
-                
-                try:
-                    insert_sql = "INSERT INTO dbo.DailyBulletinArrests (invid, [key], location, id, name, crime, [time], property, officer, [case], description, race, sex, lastname, firstname, charge, middlename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                    cursor.execute(insert_sql, (record.get("invid"), record.get("key"), record.get("location"), rec_id, record.get("name"), record.get("crime"), record.get("time"), record.get("property"), record.get("officer"), record.get("case"), record.get("description"), record.get("race"), record.get("sex"), record.get("lastname"), record.get("firstname"), record.get("charge"), record.get("middlename")))
-                    daily_inserted += 1
-                except pyodbc.Error as db_err:
-                    status(thread_name, f"[WARN] DB insert failed for ID {rec_id}. Error: {db_err}")
-                    daily_skipped += 1 
-                    continue
 
-            conn.commit()
-            page_num += 1
-            time.sleep(0.5) # Be polite between page requests
+                    with data_lock:
+                        if rec_id in existing_ids:
+                            daily_skipped += 1
+                            continue
+                        existing_ids.add(rec_id)
+                    
+                    try:
+                        insert_sql = "INSERT INTO dbo.DailyBulletinArrests (invid, [key], location, id, name, crime, [time], property, officer, [case], description, race, sex, lastname, firstname, charge, middlename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        cursor.execute(insert_sql, (record.get("invid"), record.get("key"), record.get("location"), rec_id, record.get("name"), record.get("crime"), record.get("time"), record.get("property"), record.get("officer"), record.get("case"), record.get("description"), record.get("race"), record.get("sex"), record.get("lastname"), record.get("firstname"), record.get("charge"), record.get("middlename")))
+                        daily_inserted += 1
+                    except pyodbc.Error as db_err:
+                        status(thread_name, f"[WARN] DB insert failed for ID {rec_id}. Error: {db_err}")
+                        daily_skipped += 1 
+                        continue
+
+                conn.commit()
+                page_num += 1
+                time.sleep(0.5)
+            
+            if not day_success:
+                break # Break type loop if page loop failed
 
         if day_success:
             with data_lock:
