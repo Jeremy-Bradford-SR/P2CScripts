@@ -50,6 +50,7 @@ USER_AGENTS = [
 ]
 
 # --- Global variables for thread-safe operations ---
+# --- Global variables for thread-safe operations ---
 total_inserted = 0
 total_skipped = 0
 data_lock = threading.Lock()
@@ -114,12 +115,13 @@ def daterange(start_date, end_date):
         yield start_date + timedelta(n)
 
 # --- WORKER FUNCTION (This is what each thread runs) ---
-def process_day(current_date, existing_ids, valid_proxies):
+def process_day(current_date, existing_records, existing_ids_only, valid_proxies):
     """
     Scrapes all pages for a single day and inserts new records into the database.
     Retries with a fresh proxy if a critical failure occurs.
     """
     global total_inserted, total_skipped
+    import hashlib # Imported here to ensure availability in thread, though global import is better
 
     date_str = current_date.strftime("%m/%d/%Y")
     thread_name = threading.current_thread().name
@@ -215,19 +217,58 @@ def process_day(current_date, existing_ids, valid_proxies):
 
                 for record in rows:
                     try:
-                        rec_id = str(record.get('id', '') or '').strip()
+                        raw_id = str(record.get('id', '') or '').strip()
+                        rec_key = str(record.get('key', '') or '').strip()
+                        
+                        # --- FIX 1: Synthetic ID for missing IDs ---
+                        if not raw_id or raw_id == '&nbsp;':
+                            # Generate hash based on content
+                            unique_str = f"{record.get('time')}{record.get('location')}{record.get('name')}{record.get('description')}"
+                            rec_id = hashlib.md5(unique_str.encode('utf-8')).hexdigest()
+                        else:
+                            rec_id = raw_id
+                            
                     except (ValueError, TypeError):
                         daily_skipped += 1
                         continue
 
+                    # --- FIX 2: Composite Key / ID Collision Handling ---
+                    # Logic:
+                    # 1. If (rec_id, rec_key) exists -> Duplicate, Skip.
+                    # 2. If rec_id exists (but different key) -> Collision. Modify ID to avoid PK violation.
+                    # 3. If rec_id does not exist -> Insert.
+
+                    composite_key = (rec_id, rec_key)
+                    
                     with data_lock:
-                        if rec_id in existing_ids:
+                        if composite_key in existing_records:
                             daily_skipped += 1
                             continue
-                        existing_ids.add(rec_id)
+                        
+                        # Check for ID collision
+                        if rec_id in existing_ids_only:
+                            # Collision detected! Append key to ID to make it unique.
+                            # Example: 2025008481 -> 2025008481-LW
+                            rec_id = f"{rec_id}-{rec_key}"
+                            # Re-check if this new ID exists (unlikely but possible if run multiple times)
+                            if rec_id in existing_ids_only:
+                                # If even the suffixed ID exists, check if it's the same record type (it should be)
+                                # If (rec_id, rec_key) is in existing_records, we already skipped it above.
+                                # If rec_id is in existing_ids_only but (rec_id, rec_key) is NOT, 
+                                # it means we have a collision on the suffixed ID too? 
+                                # That implies we have 2025008481-LW already.
+                                # If we are processing LW, then (2025008481-LW, LW) would be in existing_records.
+                                # So we would have skipped it.
+                                # So we should be safe to proceed, but let's be double safe.
+                                pass
+
+                        # Add to sets to prevent duplicates within the same run
+                        existing_records.add((rec_id, rec_key))
+                        existing_ids_only.add(rec_id)
                     
                     try:
                         insert_sql = "INSERT INTO dbo.DailyBulletinArrests (invid, [key], location, id, name, crime, [time], property, officer, [case], description, race, sex, lastname, firstname, charge, middlename) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        # Note: We insert rec_id (which might be synthetic or suffixed)
                         cursor.execute(insert_sql, (record.get("invid"), record.get("key"), record.get("location"), rec_id, record.get("name"), record.get("crime"), record.get("time"), record.get("property"), record.get("officer"), record.get("case"), record.get("description"), record.get("race"), record.get("sex"), record.get("lastname"), record.get("firstname"), record.get("charge"), record.get("middlename")))
                         daily_inserted += 1
                     except pyodbc.Error as db_err:
@@ -290,12 +331,18 @@ if __name__ == "__main__":
     try:
         main_conn = pyodbc.connect(conn_str)
         cursor = main_conn.cursor()
-        cursor.execute("SELECT id FROM dbo.DailyBulletinArrests")
-        # Ensure all existing IDs are treated as strings for consistent comparison.
-        existing_ids = {str(row.id) for row in cursor.fetchall()}
+        # Fetch both ID and Key to allow composite uniqueness check
+        cursor.execute("SELECT id, [key] FROM dbo.DailyBulletinArrests")
+        
+        rows = cursor.fetchall()
+        # Store as tuples: (id, key)
+        existing_records = {(str(row.id).strip(), str(row.key).strip()) for row in rows}
+        # Store just IDs for collision detection
+        existing_ids_only = {str(row.id).strip() for row in rows}
+        
         cursor.close()
         main_conn.close()
-        status("Main", f"Loaded {len(existing_ids)} existing record IDs into memory.")
+        status("Main", f"Loaded {len(existing_records)} existing records (ID+Key) into memory.")
     except Exception as e:
         status("Main", f"FATAL: Could not fetch initial IDs from database: {e}")
         sys.exit(1)
@@ -318,7 +365,7 @@ if __name__ == "__main__":
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             # Assign each day in the batch to a worker thread
-            futures = [executor.submit(process_day, date, existing_ids, valid_proxies) for date in date_chunk]
+            futures = [executor.submit(process_day, date, existing_records, existing_ids_only, valid_proxies) for date in date_chunk]
             for future in concurrent.futures.as_completed(futures):
                 try:
                     future.result()
