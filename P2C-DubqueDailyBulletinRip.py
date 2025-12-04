@@ -257,10 +257,8 @@ def process_day(current_date, existing_records, existing_ids_only, valid_proxies
                                 # If rec_id is in existing_ids_only but (rec_id, rec_key) is NOT, 
                                 # it means we have a collision on the suffixed ID too? 
                                 # That implies we have 2025008481-LW already.
-                                # If we are processing LW, then (2025008481-LW, LW) would be in existing_records.
-                                # So we would have skipped it.
-                                # So we should be safe to proceed, but let's be double safe.
-                                pass
+                                daily_skipped += 1
+                                continue
 
                         # Add to sets to prevent duplicates within the same run
                         existing_records.add((rec_id, rec_key))
