@@ -19,6 +19,7 @@ This repository contains scripts for scraping Dubuque P2C endpoints and Iowa DOC
 - `UpdateDAB-TimetoEventTime.py` / `UpdateDBA-Eventtime.ps1` — Convert raw `time` text to `event_time` DATETIME
 - `UpdateCADHandler-GeoG.ps1` — Convert geox/geoy (EPSG:26975) to WGS84 `geog`
 - `P2C-DubuqueDatabaseBackup.ps1` — SQL Server backup/prune helper
+- `backfill_geocoding.py` — Backfills missing latitude/longitude coordinates for addresses using a local geocoding proxy.
 
 ## Prerequisites
 - Python 3.8+
@@ -42,7 +43,7 @@ This repository contains scripts for scraping Dubuque P2C endpoints and Iowa DOC
     ```
 
 ## Documentation
-- Detailed per-script documentation, ETL notes, and schema samples live under `docs/` (see `docs/INDEX.md`).
+- Detailed per-script documentation, ETL notes, and schema samples live under `docs/` (see `../docs/README.md`).
 
 ## Operational Notes
 - The scrapers use public proxies and user-agent rotation to reduce the chance of being blocked.
