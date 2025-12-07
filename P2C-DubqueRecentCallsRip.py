@@ -192,5 +192,3 @@ conn.close()
 
 status("SQL Insert", f"Inserted {len(rows) - len(skipped_records)} new records")
 status("SQL Insert", f"Skipped {len(skipped_records)} duplicates")
-
-
