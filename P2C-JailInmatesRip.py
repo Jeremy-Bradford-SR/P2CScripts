@@ -137,18 +137,25 @@ def fetch_inmate_details(session, record_index, viewstate, viewstategen, eventva
     
     try:
         resp = session.get(full_url, timeout=10)
-        if resp.status_code != 200:
-            return None, []
-            
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        
-        # 2. Extract Total Bond
+        # 2. Extract Name for Verification
+        detail_name = None
+        name_span = soup.find('span', id='mainContent_CenterColumnContent_lblName')
+        if name_span:
+            detail_name = name_span.get_text(strip=True)
+
+        # 3. Extract Total Bond
         total_bond = None
         bond_span = soup.find('span', id='mainContent_CenterColumnContent_lblTotalBoundAmount')
         if bond_span:
             total_bond = bond_span.get_text(strip=True)
+
+        # 3. Extract Mugshot URL
+        mug_url = None
+        mug_img = soup.find('img', id='mainContent_CenterColumnContent_imgPhoto')
+        if mug_img and mug_img.get('src'):
+            mug_url = mug_img.get('src')
             
-        # 3. Extract Charges
+        # 4. Extract Charges
         # Look for a table that has "Charge" in headers
         charges = []
         # Since we couldn't find the table in our tests, we will look for ANY table that looks like a charges table
@@ -208,10 +215,10 @@ def fetch_inmate_details(session, record_index, viewstate, viewstategen, eventva
             if charges:
                 break # Found charges, stop looking at other tables
                 
-        return total_bond, charges
+        return total_bond, charges, mug_url, detail_name
         
     except Exception as e:
-        return None, []
+        return None, [], None, None
 
 def upsert_inmate(cursor, record, photo_data, total_bond, charges):
     book_id = record.get('book_id')
@@ -365,23 +372,52 @@ def process_inmates(valid_proxies):
         current_book_ids.add(book_id)
         
         # Fetch Details
-        # 'my_num' in record is the index (0-based)
         record_index = record.get('my_num')
+
         
-        total_bond, charges = None, []
+        total_bond, charges, mug_src, detail_name = None, [], None, None
         if record_index is not None:
             # status("Scraper", f"Fetching details for {book_id} (Index {record_index})...")
-            total_bond, charges = fetch_inmate_details(session, record_index, viewstate, viewstategen, eventvalidation)
+            total_bond, charges, mug_src, detail_name = fetch_inmate_details(session, record_index, viewstate, viewstategen, eventvalidation)
+            
+            # Verify Name
+            if detail_name:
+                # Basic check - first name match?
+                # Record name format: "ALANA-RENDILES, ANNEIRO J (W /M/34)"
+                # Detail name format: "ALANA-RENDILES, ANNEIRO J"
+                rec_last = record.get('lastname', '').upper()
+                if rec_last not in detail_name.upper():
+                    status("WARN", f"Name Mismatch! Expected {rec_last} in '{detail_name}'")
+                    # If name doesn't match, the session didn't update. Skip this one or retry?
+                    # For now, let's just log it. If it happens, we know why photos are wrong.
+
         
         # Download Photo
         photo_data = None
-        photo_url = MUG_URL_TEMPLATE.format(book_id)
-        try:
-            p_resp = session.get(photo_url, timeout=10)
-            if p_resp.status_code == 200:
-                photo_data = p_resp.content
-        except:
-            pass
+        if mug_src:
+            # Resolve URL (handle relative)
+            if not mug_src.startswith("http"):
+                # Handle leading slash or not
+                if mug_src.startswith("/"):
+                    photo_url = f"{BASE_URL}{mug_src}"
+                else:
+                    # Relative to current page (InmateDetail.aspx) -> usually base/Mug.aspx
+                    photo_url = f"{BASE_URL}/{mug_src}"
+            else:
+                photo_url = mug_src
+            
+            # Add cache buster
+            if "?" in photo_url:
+                photo_url += f"&_={int(time.time()*1000)}"
+            else:
+                photo_url += f"?_={int(time.time()*1000)}"
+                
+            try:
+                p_resp = session.get(photo_url, timeout=10)
+                if p_resp.status_code == 200:
+                    photo_data = p_resp.content
+            except:
+                pass
 
         try:
             res = upsert_inmate(cursor, record, photo_data, total_bond, charges)

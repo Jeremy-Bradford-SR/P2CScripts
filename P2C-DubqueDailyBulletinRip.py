@@ -53,6 +53,7 @@ USER_AGENTS = [
 # --- Global variables for thread-safe operations ---
 total_inserted = 0
 total_skipped = 0
+total_inserted_ids = []
 data_lock = threading.Lock()
 
 def status(step, message):
@@ -158,6 +159,7 @@ def process_day(current_date, existing_records, existing_ids_only, valid_proxies
         REPORT_TYPES = ['AR', 'TC', 'LW', 'TA']
         
         daily_inserted, daily_skipped = 0, 0
+        daily_inserted_ids = []
         day_success = True
 
         for report_type in REPORT_TYPES:
@@ -269,6 +271,7 @@ def process_day(current_date, existing_records, existing_ids_only, valid_proxies
                         # Note: We insert rec_id (which might be synthetic or suffixed)
                         cursor.execute(insert_sql, (record.get("invid"), record.get("key"), record.get("location"), rec_id, record.get("name"), record.get("crime"), record.get("time"), record.get("property"), record.get("officer"), record.get("case"), record.get("description"), record.get("race"), record.get("sex"), record.get("lastname"), record.get("firstname"), record.get("charge"), record.get("middlename")))
                         daily_inserted += 1
+                        daily_inserted_ids.append(rec_id)
                     except pyodbc.Error as db_err:
                         status(thread_name, f"[WARN] DB insert failed for ID {rec_id}. Error: {db_err}")
                         daily_skipped += 1 
@@ -285,6 +288,7 @@ def process_day(current_date, existing_records, existing_ids_only, valid_proxies
             with data_lock:
                 total_inserted += daily_inserted
                 total_skipped += daily_skipped
+                total_inserted_ids.extend(daily_inserted_ids)
 
             status(thread_name, f"Finished {date_str}. Inserted: {daily_inserted}, Skipped: {daily_skipped}")
             conn.close()
@@ -379,6 +383,32 @@ if __name__ == "__main__":
     print(f"  Total New Records Inserted: {total_inserted}")
     print(f"  Total Duplicate Records Skipped: {total_skipped}")
     print("="*30 + "\n")
+
+    # --- ADDED: Post-Processing Steps (Targeted) ---
+    if total_inserted_ids:
+        print("\n" + "="*30)
+        print("      POST-PROCESSING (New Records Only)")
+        print("="*30)
+
+        # 1. Update Event Time
+        status("Post-Process", f"Running UpdateDAB_TimetoEventTime for {len(total_inserted_ids)} records...")
+        try:
+            import UpdateDAB_TimetoEventTime
+            UpdateDAB_TimetoEventTime.update_event_time(target_ids=total_inserted_ids)
+            status("Post-Process", "Time parsing complete.")
+        except Exception as e:
+            status("Post-Process", f"Time parsing failed: {e}")
+
+        # 2. Backfill Geocoding
+        status("Post-Process", f"Running backfill_geocoding for {len(total_inserted_ids)} records...")
+        try:
+            import backfill_geocoding
+            backfill_geocoding.geocode_and_update('DailyBulletinArrests', 'id', 'location', 'event_time', target_ids=total_inserted_ids)
+            status("Post-Process", "Geocoding complete.")
+        except Exception as e:
+            status("Post-Process", f"Geocoding failed: {e}")
+    else:
+        status("Post-Process", "No new records to process.")
 
     # --- ADDED: Date Count Summary ---
     status("Analysis", "Fetching record counts for the scraped date range...")

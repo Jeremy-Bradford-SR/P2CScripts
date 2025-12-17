@@ -134,6 +134,10 @@ if not rows:
 
 # --- Step 6: Connect to SQL Server ---
 status("SQL Connection", "Connecting to SQL Server")
+
+# DEBUG: Print available drivers
+print("[DEBUG] Available ODBC Drivers:", pyodbc.drivers())
+
 conn_str = (
     f"DRIVER={MSSQL_DRIVER};"
     f"SERVER={MSSQL_SERVER};"
@@ -141,9 +145,20 @@ conn_str = (
     f"UID={MSSQL_USERNAME};"
     f"PWD={MSSQL_PASSWORD};"
     "TrustServerCertificate=yes;"
+    "LoginTimeout=30;"
 )
-conn = pyodbc.connect(conn_str)
-cursor = conn.cursor()
+
+# DEBUG: Print connection string (masking password)
+debug_conn_str = conn_str.replace(MSSQL_PASSWORD, "********")
+print(f"[DEBUG] Connection String: {debug_conn_str}")
+
+try:
+    conn = pyodbc.connect(conn_str)
+    cursor = conn.cursor()
+    print("[DEBUG] Connected successfully")
+except Exception as e:
+    print(f"[ERROR] Connection failed: {e}")
+    sys.exit(1)
 
 # --- Step 7: Insert into DB ---
 status("SQL Insert", "Inserting new records into database")
@@ -155,6 +170,7 @@ INSERT INTO dbo.CadHandler (
 """
 
 skipped_records = []
+inserted_ids = []
 
 for r in rows:
     try:
@@ -185,6 +201,7 @@ for r in rows:
         r.get("icon_url"),
         r.get("icon")
     ))
+    inserted_ids.append(rec_id)
 
 conn.commit()
 cursor.close()
@@ -192,3 +209,14 @@ conn.close()
 
 status("SQL Insert", f"Inserted {len(rows) - len(skipped_records)} new records")
 status("SQL Insert", f"Skipped {len(skipped_records)} duplicates")
+
+if inserted_ids:
+    status("Geocoding", f"Running targeted geocoding for {len(inserted_ids)} new records...")
+    try:
+        import backfill_geocoding
+        backfill_geocoding.geocode_and_update('cadHandler', 'id', 'address', 'starttime', target_ids=inserted_ids)
+        status("Geocoding", "Geocoding complete.")
+    except Exception as e:
+        status("Geocoding", f"Geocoding failed: {e}")
+else:
+    status("Geocoding", "No new records to geocode.")

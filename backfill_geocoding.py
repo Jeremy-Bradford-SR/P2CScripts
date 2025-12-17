@@ -111,7 +111,8 @@ PLACE_MAPPING = {
     "Q CASINO": "1855 SCHMITT ISLAND RD, DUBUQUE, IA",
     "DIAMOND JO": "301 BELL ST, DUBUQUE, IA",
     "KENNEDY MALL": "555 JFK RD, DUBUQUE, IA",
-    "WALMART": "4200 DODGE ST, DUBUQUE, IA", # Default to Dodge, could be Wacker
+    "WALMART": "4200 DODGE ST, DUBUQUE, IA", # Default to Dodge
+    "CRAL AVE": "CENTRAL AVE, DUBUQUE, IA", # Typo fix
 }
 
 def clean_address(address):
@@ -120,21 +121,34 @@ def clean_address(address):
     
     cleaned = address.upper().strip()
     
+    # Pre-cleaning replacements
+    cleaned = cleaned.replace("CRAL AVE", "CENTRAL AVE")
+    cleaned = cleaned.replace("NW ARTERIAL", "NORTHWEST ARTERIAL")
+    cleaned = cleaned.replace("SW ARTERIAL", "SOUTHWEST ARTERIAL")
+    cleaned = cleaned.replace("52 S", "US HWY 52 S")
+    cleaned = cleaned.replace("52 N", "US HWY 52 N")
+    
     # 1. Check Place Mapping
     if cleaned in PLACE_MAPPING:
         return PLACE_MAPPING[cleaned]
 
     # 2. Handle Narrative Text (e.g., " on X at Y", " at X")
-    # Remove <Unknown Street> noise
-    cleaned = cleaned.replace("<UNKNOWN STREET>", "")
-    cleaned = cleaned.replace("&LT;UNKNOWN STREET&GT;", "")
+    cleaned = cleaned.replace("<UNKNOWN STREET>", "").replace("&LT;UNKNOWN STREET&GT;", "")
 
-    # Regex for " at [Address]" - Handle start of string
-    # This was failing because " at 2170 Jackson St, Dubuque, IA, " has trailing comma/space
+    # Check for original city context (e.g. Peosta) to preserve it
+    original_city = None
+    if "PEOSTA" in cleaned: original_city = "PEOSTA"
+    elif "FARLEY" in cleaned: original_city = "FARLEY"
+    elif "EPWORTH" in cleaned: original_city = "EPWORTH"
+    elif "DYERSVILLE" in cleaned: original_city = "DYERSVILLE"
+    elif "CASCADE" in cleaned: original_city = "CASCADE"
+    elif "ASBURY" in cleaned: original_city = "ASBURY"
+
+    # Regex for " at [Address]"
+    # Improved regex to capture potential city parts if present
     match_at = re.search(r'(?:^|\s+)AT\s+(.+?)(?:$|\.|,)', cleaned)
     if match_at:
         potential = match_at.group(1).strip()
-        # If it looks like an address (has digits or known street suffix)
         if potential and (potential[0].isdigit() or any(x in potential for x in [' ST', ' AVE', ' RD', ' DR', ' LN', ' CT', ' PKWY', ' CIR', ' PL', ' HWY'])):
             cleaned = potential
 
@@ -146,48 +160,46 @@ def clean_address(address):
         if street1 and street2:
             cleaned = f"{street1} & {street2}"
     
-    # Regex for " on [Street]" (if no 'at' or 'at' was unknown)
+    # Regex for " on [Street]"
     match_on = re.search(r'(?:^|\s+)ON\s+(.+?)(?:$|\.|,)', cleaned)
-    if match_on and " & " not in cleaned: # Don't overwrite if we already found an intersection
+    if match_on and " & " not in cleaned:
         potential = match_on.group(1).strip()
         if potential:
             cleaned = potential
 
     # 3. Handle Block Numbers
-    # "1900-BLK MAIN ST" -> "1900 MAIN ST"
     cleaned = re.sub(r'(\d+)-BLK', r'\1', cleaned)
 
-    # 4. Handle Intersections / Mixed formats
-    # "1398 DELHI ST/W 5TH ST" -> "1398 DELHI ST" (Prioritize the specific address part)
+    # 4. Handle Intersections
     if "/" in cleaned:
         parts = cleaned.split("/")
-        # If the first part starts with a number, it's likely a specific address: "1398 DELHI ST"
-        if parts[0].strip()[0].isdigit():
-             cleaned = parts[0].strip()
+        first_part = parts[0].strip()
+        if first_part and first_part[0].isdigit():
+             cleaned = first_part
         else:
-             # Otherwise it's an intersection: "DELHI ST/W 5TH ST"
-             cleaned = cleaned.replace("/", " & ")
-             cleaned = cleaned.replace(" AND ", " & ")
+             cleaned = cleaned.replace("/", " & ").replace(" AND ", " & ")
 
     # 5. Remove Noise
     cleaned = cleaned.replace("EXIT/ENT", "")
-    cleaned = cleaned.replace("ENT", "") # Entrance
+    # Use regex for ENT to avoid corrupting words like CENTRAL
+    cleaned = re.sub(r'\bENT\b', '', cleaned) # Entrance
     
     # 6. City/State Normalization
-    # If no city, append Dubuque
-    if "," not in cleaned:
-        cleaned += ", DUBUQUE, IA"
-    elif cleaned.endswith(","):
-        cleaned += " DUBUQUE, IA"
+    # If we found a specific non-Dubuque city earlier, ensure it's used
+    if original_city and original_city not in cleaned:
+        if "," in cleaned: cleaned = cleaned.split(",")[0] # Strip existing city if any
+        cleaned += f", {original_city}, IA"
+    else:
+        # Default to Dubuque if no city present
+        if "," not in cleaned:
+            cleaned += ", DUBUQUE, IA"
+        elif cleaned.endswith(","):
+            cleaned += " DUBUQUE, IA"
     
-    # Ensure IA is present if it looks like a city is there but no state
     if not cleaned.endswith(" IA") and not cleaned.endswith(" IOWA"):
         cleaned += ", IA"
     
-    # Fix double spaces
     cleaned = " ".join(cleaned.split())
-    
-    # Final cleanup of trailing commas from original narrative parsing
     cleaned = cleaned.strip().strip(",")
 
     return cleaned
@@ -211,22 +223,44 @@ def extract_coordinates(address):
             
     return None, None
 
-def geocode_and_update(table, id_col, address_col, time_col):
+def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
     """Reads rows with null lat/lon, geocodes, and updates them."""
-    print(f"Processing {table}...")
+    # print(f"Processing {table}...")
+    
+    where_clause_base = f"lat IS NULL AND {address_col} IS NOT NULL"
+    
+    if target_ids:
+        # Construct ID list string
+        safe_ids = []
+        for x in target_ids:
+            if isinstance(x, str):
+                safe_ids.append(f"'{x}'")
+            else:
+                safe_ids.append(str(x))
+        
+        if not safe_ids:
+            return # Nothing to do
+
+        id_list_str = ",".join(safe_ids)
+        where_clause_base += f" AND {id_col} IN ({id_list_str})"
     
     # Get total count to process
-    count_sql = f"SELECT COUNT(*) as count FROM {table} WHERE lat IS NULL AND {address_col} IS NOT NULL"
+    count_sql = f"SELECT COUNT(*) as count FROM {table} WHERE {where_clause_base}"
     count_res = execute_sql(count_sql)
     total = count_res['data'][0]['count'] if count_res and count_res.get('data') else 0
-    print(f"Found {total} records to process in {table}.")
+    
+    if not target_ids:
+        print(f"Found {total} records to process in {table}.")
+
+    if total == 0:
+        return
 
     processed = 0
     batch_size = 50
     
     while True:
-        # Fetch batch - PRIORITIZE RECENT RECORDS
-        fetch_sql = f"SELECT TOP {batch_size} {id_col}, {address_col} FROM {table} WHERE lat IS NULL AND {address_col} IS NOT NULL ORDER BY {time_col} DESC"
+        # Fetch batch
+        fetch_sql = f"SELECT TOP {batch_size} {id_col}, {address_col} FROM {table} WHERE {where_clause_base} ORDER BY {time_col} DESC"
         result = execute_sql(fetch_sql)
         
         if not result or not result.get('data'):
@@ -253,12 +287,6 @@ def geocode_and_update(table, id_col, address_col, time_col):
                 # Skip known bad
                 if "PBX" in address or "UNKNOWN" in address:
                     print(f"Skipping known bad: {address}")
-                    # Mark as processed but null? For now just skip to avoid loop if we don't update
-                    # Actually, if we don't update, we'll loop forever on the same records.
-                    # Let's set lat/lon to 0,0 or something to mark as failed? 
-                    # Or better, just print and continue, relying on batch offset? 
-                    # Wait, the query is "WHERE lat IS NULL". If we don't update, we re-fetch.
-                    # We MUST update. Let's set to 0,0 for "Failed".
                     update_sql = f"UPDATE {table} SET lat = 0, lon = 0 WHERE {id_col} = {record_id}"
                     execute_sql(update_sql)
                     continue
@@ -300,15 +328,31 @@ def geocode_and_update(table, id_col, address_col, time_col):
                         lon = sum(c[1] for c in valid_coords) / len(valid_coords)
                         print(f"  -> Resolved intersection: {lat}, {lon}")
 
-                # 3. Fallback: Street Only (No Number)
+                # 3. Fallback: Street Only (with City) - Logic: Street w/o house number
                 if (lat is None) and address[0].isdigit():
                     parts = address.split(" ", 1)
                     if len(parts) > 1:
-                        street_only = parts[1]
-                        print(f"  -> Trying street fallback: {street_only}")
-                        lat, lon = fetch_coords(street_only)
+                        # parts[1] includes city "JACKSON ST, DUBUQUE, IA"
+                        street_with_city = parts[1]
+                        print(f"  -> Trying street fallback (w/ City): {street_with_city}")
+                        lat, lon = fetch_coords(street_with_city)
+                
+                # 4. Fallback: Bare Street (No City) - Critical for local Nominatim quirk
+                if (lat is None):
+                    # Try stripping city info
+                    bare_addr = address.split(',')[0].strip()
+                    # Also strip house number if present
+                    if bare_addr[0].isdigit() and " " in bare_addr:
+                         bare_addr = bare_addr.split(" ", 1)[1]
+                    
+                    print(f"  -> Trying bare street fallback (no City): {bare_addr}")
+                    lat, lon = fetch_coords(bare_addr)
+                    if not lat and "NORTHWEST ARTERIAL" in address:
+                         # Try specific alias
+                         print(f"  -> Trying alias fallback: NW ARTERIAL")
+                         lat, lon = fetch_coords("NW ARTERIAL")
 
-                # 4. Fallback: County Search (if City failed)
+                # 5. Fallback: County Search (if City failed)
                 if (lat is None) and "DUBUQUE" in address:
                     # Try replacing city with county
                     county_addr = address.replace("DUBUQUE", "DUBUQUE COUNTY")

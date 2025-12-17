@@ -81,29 +81,43 @@ def parse_time_with_regex(time_str):
 
     return None # Return None if no patterns match
 
-def update_event_time():
+def update_event_time(target_ids=None):
     updated_count = 0
     failed_count = 0
     try:
-        print(f"[INFO] Connecting to {MSSQL_SERVER} / {MSSQL_DATABASE}")
-        with pyodbc.connect(conn_str, timeout=30) as conn: # Increased timeout to 30 seconds
+        # print(f"[INFO] Connecting to {MSSQL_SERVER} / {MSSQL_DATABASE}")
+        with pyodbc.connect(conn_str, timeout=30) as conn: 
             read_cursor = conn.cursor()
             
-            # Diagnostic counts
-            read_cursor.execute("SELECT COUNT(*) FROM dbo.DailyBulletinArrests")
-            total_rows = read_cursor.fetchone()[0]
-            print(f"[INFO] Total rows in table: {total_rows}")
+            # Diagnostic counts (only if standard run)
+            if not target_ids:
+                read_cursor.execute("SELECT COUNT(*) FROM dbo.DailyBulletinArrests")
+                total_rows = read_cursor.fetchone()[0]
+                # print(f"[INFO] Total rows in table: {total_rows}")
 
-            read_cursor.execute("SELECT COUNT(*) FROM dbo.DailyBulletinArrests WHERE event_time IS NULL")
-            null_rows = read_cursor.fetchone()[0]
-            print(f"[INFO] Rows with event_time IS NULL: {null_rows}")
+                read_cursor.execute("SELECT COUNT(*) FROM dbo.DailyBulletinArrests WHERE event_time IS NULL")
+                null_rows = read_cursor.fetchone()[0]
+                # print(f"[INFO] Rows with event_time IS NULL: {null_rows}")
 
-            # Step 1: Fetch all rows that need processing
-            read_cursor.execute("SELECT id, time FROM dbo.DailyBulletinArrests WHERE event_time IS NULL OR event_time = '1900-01-01'")
+            # Step 1: Fetch rows
+            base_sql = "SELECT id, time FROM dbo.DailyBulletinArrests WHERE (event_time IS NULL OR event_time = '1900-01-01')"
+            params = []
+            
+            if target_ids:
+                # Targeted mode
+                placeholders = ', '.join(['?'] * len(target_ids))
+                base_sql += f" AND id IN ({placeholders})"
+                params.extend(target_ids)
+            
+            read_cursor.execute(base_sql, params)
             rows_to_process = read_cursor.fetchall()
             read_cursor.close()
             
-            print(f"[INFO] Found {len(rows_to_process)} rows with NULL or 1900-01-01 event_time to process.")
+            if not target_ids:
+                print(f"[INFO] Found {len(rows_to_process)} rows with NULL or 1900-01-01 event_time to process.")
+            
+            if not rows_to_process and target_ids:
+                return
 
             write_cursor = conn.cursor()
             # Step 2: Process each row in Python
