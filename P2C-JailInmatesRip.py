@@ -131,12 +131,14 @@ def fetch_inmate_details(session, record_index, viewstate, viewstategen, eventva
     # 1. Get URL
     location = get_detail_url(session, record_index, viewstate, viewstategen, eventvalidation)
     if not location:
-        return None, []
+        return None, [], None, None, None
         
     full_url = f"{BASE_URL}/{location}"
     
     try:
         resp = session.get(full_url, timeout=10)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
         # 2. Extract Name for Verification
         detail_name = None
         name_span = soup.find('span', id='mainContent_CenterColumnContent_lblName')
@@ -148,6 +150,21 @@ def fetch_inmate_details(session, record_index, viewstate, viewstategen, eventva
         bond_span = soup.find('span', id='mainContent_CenterColumnContent_lblTotalBoundAmount')
         if bond_span:
             total_bond = bond_span.get_text(strip=True)
+            if "NO BOND" in total_bond.upper() or "N/A" in total_bond.upper():
+                total_bond = "0.00"
+
+        # 4. Extract Next Court Date
+        next_court_date = None
+        court_span = soup.find('span', id='mainContent_CenterColumnContent_lblNextCourtDate')
+        if court_span:
+            court_str = court_span.get_text(strip=True)
+            status("DEBUG", f"Found Court Date String: '{court_str}'")
+            if court_str:
+                next_court_date = parse_date(court_str)
+                if next_court_date:
+                   status("DEBUG", f"Parsed Court Date: {next_court_date}")
+                else:
+                   status("DEBUG", f"Failed to parse date: '{court_str}'")
 
         # 3. Extract Mugshot URL
         mug_url = None
@@ -215,12 +232,12 @@ def fetch_inmate_details(session, record_index, viewstate, viewstategen, eventva
             if charges:
                 break # Found charges, stop looking at other tables
                 
-        return total_bond, charges, mug_url, detail_name
+        return total_bond, charges, mug_url, detail_name, next_court_date
         
     except Exception as e:
-        return None, [], None, None
+        return None, [], None, None, None
 
-def upsert_inmate(cursor, record, photo_data, total_bond, charges):
+def upsert_inmate(cursor, record, photo_data, total_bond, charges, next_court_date):
     book_id = record.get('book_id')
     if not book_id: return False
 
@@ -248,9 +265,9 @@ def upsert_inmate(cursor, record, photo_data, total_bond, charges):
             UPDATE jail_inmates SET
                 invid=?, firstname=?, lastname=?, middlename=?, disp_name=?,
                 age=?, dob=?, sex=?, race=?, arrest_date=?, agency=?, disp_agency=?,
-                last_updated=GETDATE(), released_date=NULL, total_bond_amount=?
+                last_updated=GETDATE(), released_date=NULL, total_bond_amount=?, next_court_date=?
         """
-        params = [invid, firstname, lastname, middlename, disp_name, age, dob, sex, race, arrest_date, agency, disp_agency, total_bond]
+        params = [invid, firstname, lastname, middlename, disp_name, age, dob, sex, race, arrest_date, agency, disp_agency, total_bond, next_court_date]
         
         if photo_data:
             sql += ", photo_data=?"
@@ -265,10 +282,10 @@ def upsert_inmate(cursor, record, photo_data, total_bond, charges):
         sql = """
             INSERT INTO jail_inmates (
                 book_id, invid, firstname, lastname, middlename, disp_name,
-                age, dob, sex, race, arrest_date, agency, disp_agency, photo_data, total_bond_amount
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                age, dob, sex, race, arrest_date, agency, disp_agency, photo_data, total_bond_amount, next_court_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        cursor.execute(sql, (book_id, invid, firstname, lastname, middlename, disp_name, age, dob, sex, race, arrest_date, agency, disp_agency, photo_data, total_bond))
+        cursor.execute(sql, (book_id, invid, firstname, lastname, middlename, disp_name, age, dob, sex, race, arrest_date, agency, disp_agency, photo_data, total_bond, next_court_date))
         result = "inserted"
 
     # Handle Charges
@@ -375,10 +392,26 @@ def process_inmates(valid_proxies):
         record_index = record.get('my_num')
 
         
-        total_bond, charges, mug_src, detail_name = None, [], None, None
+        total_bond, charges, mug_src, detail_name, next_court_date = None, [], None, None, None
         if record_index is not None:
-            # status("Scraper", f"Fetching details for {book_id} (Index {record_index})...")
-            total_bond, charges, mug_src, detail_name = fetch_inmate_details(session, record_index, viewstate, viewstategen, eventvalidation)
+            # Refresh ViewState for every record to ensure valid PostBack context
+            # because previous detail page visit might have changed server state.
+            try:
+                resp = session.get(JAIL_PAGE_URL, timeout=10)
+                soup_page = BeautifulSoup(resp.text, 'html.parser')
+                vs_input = soup_page.find('input', {'name': '__VIEWSTATE'})
+                vsg_input = soup_page.find('input', {'name': '__VIEWSTATEGENERATOR'})
+                ev_input = soup_page.find('input', {'name': '__EVENTVALIDATION'})
+                
+                if vs_input:
+                    viewstate = vs_input.get('value', '')
+                    viewstategen = vsg_input.get('value', '') if vsg_input else ''
+                    eventvalidation = ev_input.get('value', '') if ev_input else ''
+                    
+                    # status("Scraper", f"Fetching details for {book_id} (Index {record_index})...")
+                    total_bond, charges, mug_src, detail_name, next_court_date = fetch_inmate_details(session, record_index, viewstate, viewstategen, eventvalidation)
+            except Exception as e:
+                status("WARN", f"Failed to refresh viewstate for {book_id}: {e}")
             
             # Verify Name
             if detail_name:
@@ -413,14 +446,22 @@ def process_inmates(valid_proxies):
                 photo_url += f"?_={int(time.time()*1000)}"
                 
             try:
-                p_resp = session.get(photo_url, timeout=10)
+                # Add Referer to trick server
+                p_headers = {"Referer": f"{BASE_URL}/InmateDetail.aspx"}
+                p_resp = session.get(photo_url, headers=p_headers, timeout=10)
                 if p_resp.status_code == 200:
-                    photo_data = p_resp.content
+                    data = p_resp.content
+                    # Check for stock photo (1981 bytes)
+                    if len(data) == 1981:
+                        # status("PHOTO", "Stock photo detected. Skipping.")
+                        photo_data = None
+                    else:
+                        photo_data = data
             except:
                 pass
 
         try:
-            res = upsert_inmate(cursor, record, photo_data, total_bond, charges)
+            res = upsert_inmate(cursor, record, photo_data, total_bond, charges, next_court_date)
             if res == "inserted":
                 total_inserted += 1
             elif res == "updated":
