@@ -269,10 +269,6 @@ def upsert_inmate(cursor, record, photo_data, total_bond, charges, next_court_da
         """
         params = [invid, firstname, lastname, middlename, disp_name, age, dob, sex, race, arrest_date, agency, disp_agency, total_bond, next_court_date]
         
-        if photo_data:
-            sql += ", photo_data=?"
-            params.append(photo_data)
-            
         sql += " WHERE book_id=?"
         params.append(book_id)
         cursor.execute(sql, params)
@@ -282,11 +278,21 @@ def upsert_inmate(cursor, record, photo_data, total_bond, charges, next_court_da
         sql = """
             INSERT INTO jail_inmates (
                 book_id, invid, firstname, lastname, middlename, disp_name,
-                age, dob, sex, race, arrest_date, agency, disp_agency, photo_data, total_bond_amount, next_court_date
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                age, dob, sex, race, arrest_date, agency, disp_agency, total_bond_amount, next_court_date
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
-        cursor.execute(sql, (book_id, invid, firstname, lastname, middlename, disp_name, age, dob, sex, race, arrest_date, agency, disp_agency, photo_data, total_bond, next_court_date))
+        cursor.execute(sql, (book_id, invid, firstname, lastname, middlename, disp_name, age, dob, sex, race, arrest_date, agency, disp_agency, total_bond, next_court_date))
         result = "inserted"
+
+    # Handle Photo (Upsert into jail_photos)
+    if photo_data:
+        # Check if photo exists/needs update? 
+        # For now, just upsert.
+        cursor.execute("SELECT book_id FROM jail_photos WHERE book_id=?", book_id)
+        if cursor.fetchone():
+            cursor.execute("UPDATE jail_photos SET photo_data=?, last_updated=GETDATE() WHERE book_id=?", (photo_data, book_id))
+        else:
+            cursor.execute("INSERT INTO jail_photos (book_id, photo_data, last_updated) VALUES (?, ?, GETDATE())", (book_id, photo_data))
 
     # Handle Charges
     # If we found detailed charges, use them.

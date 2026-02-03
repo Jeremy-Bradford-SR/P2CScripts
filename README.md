@@ -20,6 +20,9 @@ This repository contains scripts for scraping Dubuque P2C endpoints and Iowa DOC
 - `UpdateCADHandler-GeoG.ps1` — Convert geox/geoy (EPSG:26975) to WGS84 `geog`
 - `P2C-DubuqueDatabaseBackup.ps1` — SQL Server backup/prune helper
 - `backfill_geocoding.py` — Backfills missing latitude/longitude coordinates for addresses using a local geocoding proxy.
+- `create_view_violators.py` — Creates the `vw_DistinctViolators` view for identifying repeat offenders.
+- `check_view.py` / `check_schema.py` — Utility scripts for verifying database schema and view health.
+- `debug_jail_raw.py` — Diagnostic script for inspecting raw jail scraper HTML output.
 
 ## Prerequisites
 - Python 3.8+
