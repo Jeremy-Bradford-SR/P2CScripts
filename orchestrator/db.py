@@ -1,26 +1,37 @@
 import sqlite3
 import os
-import queue
 import threading
 
-# Thread-safe connection pool
-_conn_pool = queue.Queue(maxsize=5)
-_pool_lock = threading.Lock()
+# SQLite doesn't support connection pooling across threads
+# Use thread-local storage instead
+_thread_local = threading.local()
 
 def get_db_connection():
-    """Gets a connection from the pool or creates a new one."""
-    try:
-        return _conn_pool.get_nowait()
-    except queue.Empty:
-        # Pool exhausted, create new connection
-        return sqlite3.connect('/tmp/orchestrator.db', timeout=10.0)
+    """Gets a thread-local connection to prevent SQLite thread errors."""
+    # Check if we have a connection and if it's still valid
+    if hasattr(_thread_local, 'connection') and _thread_local.connection is not None:
+        try:
+            # Test if connection is still alive
+            _thread_local.connection.execute('SELECT 1')
+            return _thread_local.connection
+        except (sqlite3.ProgrammingError, sqlite3.DatabaseError):
+            # Connection is closed or invalid, recreate it
+            pass
+    
+    # Create new connection
+    _thread_local.connection = sqlite3.connect('/tmp/orchestrator.db', timeout=10.0, check_same_thread=True)
+    return _thread_local.connection
 
 def return_db_connection(conn):
-    """Returns a connection to the pool or closes it ifpool is full."""
-    if conn is None:
-        return
-    try:
-        _conn_pool.put_nowait(conn)
-    except queue.Full:
-        # Pool full, close connection
-        conn.close()
+    """No-op for SQLite thread-local connections (kept for API compatibility)."""
+    # Don't close - connection is reused per thread
+    pass
+
+def close_thread_connection():
+    """Explicitly close thread-local connection (call on thread shutdown if needed)."""
+    if hasattr(_thread_local, 'connection') and _thread_local.connection:
+        try:
+            _thread_local.connection.close()
+        except:
+            pass
+        _thread_local.connection = None
