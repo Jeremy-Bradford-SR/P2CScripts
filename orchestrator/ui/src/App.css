@@ -1,0 +1,270 @@
+:root {
+  --bg-color: #0f0f13;
+  --card-bg: rgba(30, 30, 40, 0.7);
+  --card-border: rgba(255, 255, 255, 0.1);
+  --primary: #646cff;
+  --primary-hover: #7b83ff;
+  --text-main: #ffffff;
+  --text-muted: #a1a1aa;
+  --success: #2ecc71;
+  --running: #f1c40f;
+  --failure: #e74c3c;
+}
+
+body {
+  background-color: var(--bg-color);
+  color: var(--text-main);
+  font-family: 'Inter', system-ui, Avenir, Helvetica, Arial, sans-serif;
+  margin: 0;
+  min-height: 100vh;
+  background-image: radial-gradient(circle at 50% 0%, #1a1a2e 0%, var(--bg-color) 70%);
+}
+
+.container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+  border-bottom: 1px solid var(--card-border);
+  padding-bottom: 1rem;
+}
+
+h1 { font-size: 2rem; font-weight: 700; margin: 0; background: linear-gradient(to right, #646cff, #9f5afd); -webkit-background-clip: text; background-clip: text; color: transparent; }
+h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1rem; color: var(--text-main); }
+
+.card {
+  background: var(--card-bg);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+
+.btn {
+  background: var(--primary);
+  color: white;
+  border: none;
+  padding: 0.6em 1.2em;
+  font-size: 0.9rem;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--primary-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(100, 108, 255, 0.3);
+}
+
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-secondary {
+  background: transparent;
+  border: 1px solid var(--card-border);
+  color: var(--text-muted);
+}
+.btn-secondary:hover {
+  border-color: var(--text-main);
+  color: var(--text-main);
+  background: rgba(255,255,255,0.05);
+}
+
+/* Job List Grid */
+.job-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 1.5rem;
+}
+
+.job-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  padding: 1.2rem;
+  transition: transform 0.2s, border-color 0.2s;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.job-card:hover {
+  transform: translateY(-2px);
+  border-color: var(--primary);
+}
+
+.job-card h3 { margin: 0 0 0.5rem 0; font-size: 1.1rem; }
+.job-card p { margin: 0 0 1rem 0; font-size: 0.85rem; color: var(--text-muted); font-family: monospace; }
+.job-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
+
+/* Table */
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.8rem;
+  border-bottom: 1px solid var(--card-border);
+}
+
+th { color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
+td { font-size: 0.9rem; }
+
+.status-RUNNING { color: var(--running); font-weight: bold; }
+.status-SUCCESS { color: var(--success); }
+.status-FAILURE { color: var(--failure); }
+
+/* Logs */
+.logs-box {
+  background: #000;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  padding: 1rem;
+  height: 400px;
+  overflow-y: auto;
+  font-family: 'Fira Code', monospace;
+  font-size: 0.85rem;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+}
+
+.log-entry { margin-bottom: 0.2rem; border-bottom: 1px solid #111; padding-bottom: 0.1rem; }
+.log-ts { color: #555; margin-right: 0.5rem; user-select: none; }
+
+/* Modal */
+.modal-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(0,0,0,0.7);
+  backdrop-filter: blur(4px);
+  display: flex; justify-content: center; align-items: center;
+  z-index: 1000;
+}
+.modal {
+  background: #1e1e24;
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 2rem;
+  width: 500px;
+  max-width: 90%;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+}
+.modal h2 { margin-top: 0; }
+textarea.config-editor {
+  width: 100%; height: 200px;
+  background: #111; color: #eee;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  padding: 1rem;
+  font-family: monospace;
+  margin-bottom: 1rem;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 1rem; }
+
+/* Glassmorphism & Premium UI */
+:root {
+  --glass-bg: rgba(30, 41, 59, 0.7);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --accent-gradient: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%);
+  --success-gradient: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  --control-bg: rgba(0, 0, 0, 0.2);
+}
+
+.glass-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+  padding: 1.5rem;
+  color: white;
+}
+
+.tab-nav {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+  margin-bottom: 2rem;
+  background: rgba(0,0,0,0.2);
+  padding: 0.5rem;
+  border-radius: 99px;
+  width: fit-content;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.tab-btn {
+  background: transparent;
+  color: #94a3b8;
+  border: none;
+  padding: 0.75rem 2rem;
+  border-radius: 99px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.tab-btn.active {
+  background: var(--accent-gradient);
+  color: white;
+  box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);
+}
+
+.stat-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.stat-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 4px;
+  background: var(--accent-gradient);
+}
+
+.btn-premium {
+  background: var(--accent-gradient);
+  border: none;
+  color: white;
+  padding: 0.5rem 1.5rem;
+  border-radius: 8px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+
+.btn-premium:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+textarea.premium-input {
+  background: var(--control-bg);
+  border: 1px solid var(--glass-border);
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 1rem;
+  font-family: monospace;
+  width: 100%;
+  transition: border-color 0.2s;
+}
+
+textarea.premium-input:focus {
+  outline: none;
+  border-color: #8b5cf6;
+}

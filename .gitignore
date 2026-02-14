@@ -26,3 +26,6 @@ ENV/
 # Logs
 sql_debug.log
 event_time_debug.log
+
+# SQLite databases (now ephemeral in /tmp)
+orchestrator/orchestrator.db

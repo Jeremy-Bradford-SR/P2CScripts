@@ -1,121 +1,31 @@
 import requests
 import json
 import time
-import pyodbc
+
 import os
 import re
 
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+import shared_utils
+
 # Configuration
-PROXY_GEOCODE_URL = "http://localhost:9000/geocode"
+PROXY_GEOCODE_URL = os.getenv("PROXY_GEOCODE_URL", "http://p2cproxy:9000/geocode")
 
-def get_db_connection():
-    """Establishes a database connection using settings from .env-db."""
-    # Path to .env-db (one directory up from scripts/)
-    env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env-db')
-    
-    conn_str_raw = ""
-    if os.path.exists(env_path):
-        with open(env_path, 'r') as f:
-            for line in f:
-                if line.startswith("ConnectionStrings__Default="):
-                    conn_str_raw = line.strip().split("=", 1)[1]
-                    break
-    
-    if not conn_str_raw:
-        raise Exception("Could not find ConnectionStrings__Default in .env-db")
-
-    # Parse connection string
-    parts = [p for p in conn_str_raw.split(';') if p]
-    params = {}
-    for p in parts:
-        if '=' in p:
-            k, v = p.split('=', 1)
-            params[k.strip()] = v.strip()
-
-    # Build ODBC connection string
-    driver = "{ODBC Driver 18 for SQL Server}"
-    server = params.get('Server')
-    database = params.get('Database')
-    uid = params.get('User Id')
-    pwd = params.get('Password')
-    trust_cert = params.get('TrustServerCertificate', 'no')
-    if trust_cert.lower() == 'true':
-        trust_cert = 'yes'
-    
-    conn_str = f"DRIVER={driver};SERVER={server};DATABASE={database};UID={uid};PWD={pwd};TrustServerCertificate={trust_cert};"
-    
-    return pyodbc.connect(conn_str)
-
-def execute_sql(sql):
-    """Executes SQL directly against the database."""
-    conn = None
+def ensure_columns(table):
+    """Ensures lat/lon columns exist via API."""
+    print(f"Ensuring columns for {table}...")
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Simple check to see if we should fetch results
-        is_select = sql.strip().upper().startswith("SELECT")
-        
-        cursor.execute(sql)
-        
-        if is_select:
-            columns = [column[0] for column in cursor.description]
-            results = []
-            for row in cursor.fetchall():
-                results.append(dict(zip(columns, row)))
-            return {'data': results}
-        else:
-            conn.commit()
-            return {'data': []}
-            
+        api = shared_utils.APIClient()
+        api.post("tools/schema/ensure-geocode-columns", {"table": table})
+        print(f"Columns ensured for {table}.")
     except Exception as e:
-        print(f"Exception executing SQL: {e}")
-        return None
-
-def add_columns(table):
-    """Adds lat and lon columns if they don't exist."""
-    print(f"Checking columns for {table}...")
-    # Check if columns exist
-    check_sql = f"""
-    SELECT COLUMN_NAME 
-    FROM INFORMATION_SCHEMA.COLUMNS 
-    WHERE TABLE_NAME = '{table}' AND COLUMN_NAME IN ('lat', 'lon')
-    """
-    result = execute_sql(check_sql)
-    if result and len(result.get('data', [])) == 2:
-        print(f"Columns lat and lon already exist in {table}.")
-        return
-
-    print(f"Adding columns to {table}...")
-    alter_sql = f"ALTER TABLE {table} ADD lat FLOAT, lon FLOAT;"
-    execute_sql(alter_sql)
-    print(f"Columns added to {table}.")
+        print(f"Error ensuring columns: {e}")
 
 def clean_address(address):
     """Cleans address string to improve geocoding success."""
-    if not address:
-        return ""
-    
-    # Check for coordinates in the address string (e.g. "487200 -90.6267955")
-    # This regex looks for a float-like number, space/comma, float-like number
-# --- Enhanced Cleaning & Geocoding Logic ---
-
-PLACE_MAPPING = {
-    "DLEC": "770 IOWA ST, DUBUQUE, IA",
-    "DUBUQUE LAW ENFORCEMENT CENTER": "770 IOWA ST, DUBUQUE, IA",
-    "MERCY HOSPITAL": "250 MERCY DR, DUBUQUE, IA",
-    "FINLEY HOSPITAL": "350 N GRANDVIEW AVE, DUBUQUE, IA",
-    "CLARKE UNIVERSITY": "1550 CLARKE DR, DUBUQUE, IA",
-    "LORAS COLLEGE": "1450 ALTA VISTA ST, DUBUQUE, IA",
-    "UNIVERSITY OF DUBUQUE": "2000 UNIVERSITY AVE, DUBUQUE, IA",
-    "Q CASINO": "1855 SCHMITT ISLAND RD, DUBUQUE, IA",
-    "DIAMOND JO": "301 BELL ST, DUBUQUE, IA",
-    "KENNEDY MALL": "555 JFK RD, DUBUQUE, IA",
-    "WALMART": "4200 DODGE ST, DUBUQUE, IA", # Default to Dodge
-    "CRAL AVE": "CENTRAL AVE, DUBUQUE, IA", # Typo fix
-}
-
-def clean_address(address):
     if not address:
         return ""
     
@@ -128,6 +38,21 @@ def clean_address(address):
     cleaned = cleaned.replace("52 S", "US HWY 52 S")
     cleaned = cleaned.replace("52 N", "US HWY 52 N")
     
+    PLACE_MAPPING = {
+        "DLEC": "770 IOWA ST, DUBUQUE, IA",
+        "DUBUQUE LAW ENFORCEMENT CENTER": "770 IOWA ST, DUBUQUE, IA",
+        "MERCY HOSPITAL": "250 MERCY DR, DUBUQUE, IA",
+        "FINLEY HOSPITAL": "350 N GRANDVIEW AVE, DUBUQUE, IA",
+        "CLARKE UNIVERSITY": "1550 CLARKE DR, DUBUQUE, IA",
+        "LORAS COLLEGE": "1450 ALTA VISTA ST, DUBUQUE, IA",
+        "UNIVERSITY OF DUBUQUE": "2000 UNIVERSITY AVE, DUBUQUE, IA",
+        "Q CASINO": "1855 SCHMITT ISLAND RD, DUBUQUE, IA",
+        "DIAMOND JO": "301 BELL ST, DUBUQUE, IA",
+        "KENNEDY MALL": "555 JFK RD, DUBUQUE, IA",
+        "WALMART": "4200 DODGE ST, DUBUQUE, IA", # Default to Dodge
+        "CRAL AVE": "CENTRAL AVE, DUBUQUE, IA", # Typo fix
+    }
+
     # 1. Check Place Mapping
     if cleaned in PLACE_MAPPING:
         return PLACE_MAPPING[cleaned]
@@ -145,7 +70,6 @@ def clean_address(address):
     elif "ASBURY" in cleaned: original_city = "ASBURY"
 
     # Regex for " at [Address]"
-    # Improved regex to capture potential city parts if present
     match_at = re.search(r'(?:^|\s+)AT\s+(.+?)(?:$|\.|,)', cleaned)
     if match_at:
         potential = match_at.group(1).strip()
@@ -224,55 +148,35 @@ def extract_coordinates(address):
     return None, None
 
 def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
-    """Reads rows with null lat/lon, geocodes, and updates them."""
-    # print(f"Processing {table}...")
+    """Reads rows with null lat/lon, geocodes, and updates them via API."""
+    api = shared_utils.APIClient()
     
-    where_clause_base = f"lat IS NULL AND {address_col} IS NOT NULL"
-    
-    if target_ids:
-        # Construct ID list string
-        safe_ids = []
-        for x in target_ids:
-            if isinstance(x, str):
-                safe_ids.append(f"'{x}'")
-            else:
-                safe_ids.append(str(x))
-        
-        if not safe_ids:
-            return # Nothing to do
-
-        id_list_str = ",".join(safe_ids)
-        where_clause_base += f" AND {id_col} IN ({id_list_str})"
-    
-    # Get total count to process
-    count_sql = f"SELECT COUNT(*) as count FROM {table} WHERE {where_clause_base}"
-    count_res = execute_sql(count_sql)
-    total = count_res['data'][0]['count'] if count_res and count_res.get('data') else 0
-    
-    if not target_ids:
-        print(f"Found {total} records to process in {table}.")
-
-    if total == 0:
-        return
-
-    processed = 0
-    batch_size = 50
+    # Pre-check or just loop
+    total_processed = 0
     
     while True:
-        # Fetch batch
-        fetch_sql = f"SELECT TOP {batch_size} {id_col}, {address_col} FROM {table} WHERE {where_clause_base} ORDER BY {time_col} DESC"
-        result = execute_sql(fetch_sql)
-        
-        if not result or not result.get('data'):
+        candidates = []
+        try:
+            if target_ids:
+                # Targeted Fetch
+                candidates = api.post("tools/geocode/fetch-addresses", {"ids": [str(x) for x in target_ids], "table": table})
+                # Only run once if targeted
+                target_ids = None # Clear after first run check?
+                # Actually, if we pass target_ids, we process them and break.
+            else:
+                # Batch Fetch
+                candidates = api.get(f"tools/geocode/candidates?table={table}&count=50")
+        except Exception as e:
+            print(f"API Fetch Error: {e}")
+            raise e
+            
+        if not candidates:
             break
             
-        rows = result['data']
-        if not rows:
-            break
-            
-        for row in rows:
-            record_id = row[id_col]
-            raw_address = row[address_col]
+        updates = []
+        for row in candidates:
+            record_id = row.get('id') or row.get('Id')
+            raw_address = row.get('address') or row.get('Address')
             
             if not raw_address:
                 continue
@@ -287,13 +191,23 @@ def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
                 # Skip known bad
                 if "PBX" in address or "UNKNOWN" in address:
                     print(f"Skipping known bad: {address}")
-                    update_sql = f"UPDATE {table} SET lat = 0, lon = 0 WHERE {id_col} = {record_id}"
-                    execute_sql(update_sql)
+                    updates.append({"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table})
                     continue
 
                 def fetch_coords(query):
                     for attempt in range(2): # Reduced retries for speed
                         try:
+                            # Use requests directly for proxy as it might be internal or direct
+                            # Usually PROXY_GEOCODE_URL is external or internal service
+                            # "http://localhost:9000/geocode" -> p2cproxy:9000
+                            # If running in orchestrator, localhost:9000 IS available (if host net?)
+                            # No, orchestrator is in container. localhost refers to itself.
+                            # It should use "http://p2cproxy:9000/geocode"
+                            # But wait, PROXY_GEOCODE_URL is defined at top.
+                            # I'll rely on it being correct or update it.
+                            # Assuming "http://p2cproxy:9000/geocode" for container networking.
+                            # Or PROXY_GEOCODE_URL
+                            
                             r = requests.get(PROXY_GEOCODE_URL, params={'q': query}, timeout=3)
                             if r.status_code == 200:
                                 d = r.json()
@@ -314,7 +228,6 @@ def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
                     city_suffix = ", DUBUQUE, IA"
                     if "," in parts[-1]:
                         city_suffix = parts[-1][parts[-1].find(","):]
-
                     valid_coords = []
                     for part in parts:
                         part = part.strip()
@@ -322,60 +235,61 @@ def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
                         query = part if "," in part else part + city_suffix
                         plat, plon = fetch_coords(query)
                         if plat: valid_coords.append((plat, plon))
-                    
                     if valid_coords:
                         lat = sum(c[0] for c in valid_coords) / len(valid_coords)
                         lon = sum(c[1] for c in valid_coords) / len(valid_coords)
                         print(f"  -> Resolved intersection: {lat}, {lon}")
 
-                # 3. Fallback: Street Only (with City) - Logic: Street w/o house number
+                # 3. Fallback: Street Only (with City)
                 if (lat is None) and address[0].isdigit():
                     parts = address.split(" ", 1)
                     if len(parts) > 1:
-                        # parts[1] includes city "JACKSON ST, DUBUQUE, IA"
                         street_with_city = parts[1]
-                        print(f"  -> Trying street fallback (w/ City): {street_with_city}")
+                        # print(f"  -> Trying street fallback: {street_with_city}")
                         lat, lon = fetch_coords(street_with_city)
                 
-                # 4. Fallback: Bare Street (No City) - Critical for local Nominatim quirk
+                # 4. Fallback: Bare Street
                 if (lat is None):
-                    # Try stripping city info
                     bare_addr = address.split(',')[0].strip()
-                    # Also strip house number if present
                     if bare_addr[0].isdigit() and " " in bare_addr:
                          bare_addr = bare_addr.split(" ", 1)[1]
-                    
-                    print(f"  -> Trying bare street fallback (no City): {bare_addr}")
+                    # print(f"  -> Trying bare street: {bare_addr}")
                     lat, lon = fetch_coords(bare_addr)
                     if not lat and "NORTHWEST ARTERIAL" in address:
-                         # Try specific alias
-                         print(f"  -> Trying alias fallback: NW ARTERIAL")
                          lat, lon = fetch_coords("NW ARTERIAL")
 
-                # 5. Fallback: County Search (if City failed)
+                # 5. Fallback: County
                 if (lat is None) and "DUBUQUE" in address:
-                    # Try replacing city with county
                     county_addr = address.replace("DUBUQUE", "DUBUQUE COUNTY")
-                    print(f"  -> Trying county fallback: {county_addr}")
+                    # print(f"  -> Trying county: {county_addr}")
                     lat, lon = fetch_coords(county_addr)
 
             if lat is not None and lon is not None:
-                # Update DB
-                id_val = f"'{record_id}'" if isinstance(record_id, str) else record_id
-                update_sql = f"UPDATE {table} SET lat = {lat}, lon = {lon} WHERE {id_col} = {id_val}"
-                execute_sql(update_sql)
-                print(f"Updated {table} {record_id}: {lat}, {lon}")
+                updates.append({"Id": str(record_id), "Lat": lat, "Lon": lon, "Table": table})
+                print(f"Geocoded {record_id}: {lat}, {lon}")
             else:
-                print(f"No geocode for {raw_address} (cleaned: {address})")
-                # Mark as failed (0,0) to prevent re-processing loop
-                id_val = f"'{record_id}'" if isinstance(record_id, str) else record_id
-                update_sql = f"UPDATE {table} SET lat = 0, lon = 0 WHERE {id_col} = {id_val}"
-                execute_sql(update_sql)
+                print(f"Failed Geocode {record_id} ({raw_address}) -> Cleaned: {address}")
+                updates.append({"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table})
             
-            processed += 1
+            total_processed += 1
             time.sleep(0.05)
             
-        print(f"Processed {processed}/{total}...")
+        # Send updates
+        if updates:
+            try:
+                api.post("tools/geocode/update", updates)
+            except Exception as e:
+                print(f"Update Batch Error: {e}")
+                raise e
+        
+        # If we were doing targeted, we are done
+        if target_ids is None and not candidates: 
+           break
+        if candidates and target_ids is not None: 
+           # We processed the target batch, so break
+           break
+
+    print(f"Processed {total_processed} records.")
 
 def main():
     import argparse
@@ -383,9 +297,9 @@ def main():
     parser.add_argument('--table', help='Specific table to process (cadHandler or DailyBulletinArrests)')
     args = parser.parse_args()
 
-    # 1. Add columns
-    add_columns('cadHandler')
-    add_columns('DailyBulletinArrests')
+    # 1. Add columns (Via API)
+    ensure_columns('cadHandler')
+    ensure_columns('DailyBulletinArrests')
 
     # 2. Process based on argument
     if args.table == 'cadHandler' or not args.table:
