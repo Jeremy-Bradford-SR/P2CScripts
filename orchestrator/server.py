@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 import asyncio
+from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
@@ -19,6 +20,19 @@ from setup_orchestrator_db import create_tables
 class RunJobRequest(BaseModel):
     config: Optional[Dict[str, Any]] = {}
 
+class TaskCreate(BaseModel):
+    job_id: int
+    name: str
+    interval_minutes: int
+    config: Optional[Dict[str, Any]] = {}
+    enabled: bool = True
+
+class TaskUpdate(BaseModel):
+    name: Optional[str] = None
+    interval_minutes: Optional[int] = None
+    config: Optional[Dict[str, Any]] = None
+    enabled: Optional[bool] = None
+
 # --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,9 +47,15 @@ async def lifespan(app: FastAPI):
         print(f"DB Init Failed: {e}")
         
     ProxyManager().start_refresher()
+    
+    # Start Scheduler
+    scheduler_task = asyncio.create_task(scheduler_loop())
+    
     yield
+    
     # Shutdown
     print("Shutting down services...")
+    scheduler_task.cancel()
 
 app = FastAPI(title="P2C Orchestrator", version="1.0.0", lifespan=lifespan)
 
@@ -50,6 +70,62 @@ app.add_middleware(
 
 # Global task tracking for job cancellation
 active_tasks = {}  # {run_id: asyncio.Task}
+
+# --- Scheduler ---
+async def scheduler_loop():
+    """Background task to check for scheduled jobs to run."""
+    print("Scheduler: Started.")
+    while True:
+        try:
+            await asyncio.sleep(10) # Check every 10 seconds
+            
+            conn = get_db_connection()
+            if not conn: continue
+            
+            cursor = conn.cursor()
+            now = datetime.now()
+            
+            # Find tasks where enabled=1 AND (next_run <= now OR next_run IS NULL)
+            # Use 'limit 10' to verify logic without flooding
+            cursor.execute("""
+                SELECT t.task_id, t.job_id, t.config_json, t.interval_minutes, j.script_path
+                FROM orchestrator_tasks t
+                JOIN orchestrator_jobs j ON t.job_id = j.job_id
+                WHERE t.enabled = 1 
+                AND (t.next_run IS NULL OR t.next_run <= ?)
+            """, (now,))
+            
+            tasks_to_run = cursor.fetchall()
+            
+            for row in tasks_to_run:
+                task_id, job_id, config_json, interval, script_path = row
+                
+                # Calculate next run time
+                next_run = now + timedelta(minutes=interval)
+                
+                # Update DB immediately to prevent double-execution
+                cursor.execute("""
+                    UPDATE orchestrator_tasks 
+                    SET last_run = ?, next_run = ? 
+                    WHERE task_id = ?
+                """, (now, next_run, task_id))
+                conn.commit()
+                
+                print(f"Scheduler: Triggering Task {task_id} (Job {job_id})")
+                
+                # Execute Job
+                full_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", script_path))
+                # Fire and forget (JobRunner handles logging)
+                asyncio.create_task(JobRunner.run_job(job_id, full_path, config_json, ProxyManager()))
+                
+            return_db_connection(conn)
+            
+        except asyncio.CancelledError:
+            print("Scheduler: Stopped.")
+            break
+        except Exception as e:
+            print(f"Scheduler Error: {e}")
+            await asyncio.sleep(5) # Backoff on error
 
 # --- Routes ---
 
@@ -139,6 +215,108 @@ def get_logs(run_id: int):
         logs.append(dict(zip(columns, row)))
     return_db_connection(conn)
     return logs
+
+# --- Task Management API ---
+
+@app.get("/api/tasks")
+def get_tasks():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT t.*, j.name as job_name 
+        FROM orchestrator_tasks t
+        JOIN orchestrator_jobs j ON t.job_id = j.job_id
+        ORDER BY t.task_id ASC
+    """)
+    tasks = []
+    columns = [column[0] for column in cursor.description]
+    for row in cursor.fetchall():
+        tasks.append(dict(zip(columns, row)))
+    return_db_connection(conn)
+    return tasks
+
+@app.post("/api/tasks")
+def create_task(task: TaskCreate):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    import json
+    config_str = json.dumps(task.config) if task.config else "{}"
+    
+    # Set next_run to NOW so it runs immediately (or should we wait for interval?)
+    # Let's set it to NOW + interval so it doesn't run instantly upon creation?
+    # Or maybe user EXPECTS it to run? Let's use NULL so it runs on next sweep.
+    
+    cursor.execute("""
+        INSERT INTO orchestrator_tasks (job_id, name, config_json, interval_minutes, enabled)
+        VALUES (?, ?, ?, ?, ?)
+    """, (task.job_id, task.name, config_str, task.interval_minutes, 1 if task.enabled else 0))
+    
+    new_id = cursor.lastrowid
+    conn.commit()
+    return_db_connection(conn)
+    return {"status": "Task created", "task_id": new_id}
+
+@app.put("/api/tasks/{task_id}")
+def update_task(task_id: int, task: TaskUpdate):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Build dynamic update query
+    fields = []
+    values = []
+    
+    if task.name is not None:
+        fields.append("name = ?")
+        values.append(task.name)
+    
+    if task.interval_minutes is not None:
+        fields.append("interval_minutes = ?")
+        values.append(task.interval_minutes)
+        # If interval changes, should we reset next_run? Maybe not.
+        
+    if task.config is not None:
+        import json
+        fields.append("config_json = ?")
+        values.append(json.dumps(task.config))
+        
+    if task.enabled is not None:
+        fields.append("enabled = ?")
+        values.append(1 if task.enabled else 0)
+        
+    if not fields:
+        return {"status": "No changes"}
+        
+    values.append(task_id)
+    sql = f"UPDATE orchestrator_tasks SET {', '.join(fields)} WHERE task_id = ?"
+    
+    cursor.execute(sql, tuple(values))
+    conn.commit()
+    return_db_connection(conn)
+    
+    return {"status": "Task updated"}
+
+@app.delete("/api/tasks/{task_id}")
+def delete_task(task_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM orchestrator_tasks WHERE task_id = ?", (task_id,))
+    conn.commit()
+    return_db_connection(conn)
+    return {"status": "Task deleted"}
+
+@app.post("/api/tasks/{task_id}/run")
+def run_task_now(task_id: int):
+    """Force run a task immediately."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Reset next_run to NOW, scheduler will pick it up in <10s
+    cursor.execute("UPDATE orchestrator_tasks SET next_run = CURRENT_TIMESTAMP WHERE task_id = ?", (task_id,))
+    conn.commit()
+    return_db_connection(conn)
+    
+    return {"status": "Task scheduled for immediate execution"}
 
 # Mount UI (Place this last)
 # Determine absolute path to UI dist folder

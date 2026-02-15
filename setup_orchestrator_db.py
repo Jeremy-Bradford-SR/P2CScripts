@@ -61,13 +61,15 @@ def create_tables(scan_dir="."):
         )
         """,
         """
-        CREATE TABLE IF NOT EXISTS orchestrator_schedules (
-            schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        CREATE TABLE IF NOT EXISTS orchestrator_tasks (
+            task_id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id INTEGER NOT NULL,
-            cron_expression TEXT NOT NULL,
-            args_override TEXT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            name TEXT NOT NULL,
+            config_json TEXT DEFAULT '{}',
+            interval_minutes INTEGER NOT NULL,
+            last_run DATETIME NULL,
+            next_run DATETIME NULL,
+            enabled INTEGER DEFAULT 1,
             FOREIGN KEY(job_id) REFERENCES orchestrator_jobs(job_id)
         )
         """,

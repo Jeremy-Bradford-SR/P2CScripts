@@ -5,6 +5,7 @@ import './App.css';
 import ProxyStatus from './components/ProxyStatus';
 
 import ProxyTab from './components/ProxyTab';
+import TaskTab from './components/TaskTab';
 
 function App() {
     const [activeTab, setActiveTab] = useState('ingestion');
@@ -104,6 +105,12 @@ function App() {
                 >
                     🌐 Proxy Network
                 </button>
+                <button
+                    className={`tab-btn ${activeTab === 'tasks' ? 'active' : ''}`}
+                    onClick={() => setActiveTab('tasks')}
+                >
+                    ⏱️ Tasks
+                </button>
             </div>
 
             {/* Ingestion Tab */}
@@ -195,6 +202,11 @@ function App() {
             {/* Proxy Tab */}
             {activeTab === 'proxies' && (
                 <ProxyTab />
+            )}
+
+            {/* Tasks Tab */}
+            {activeTab === 'tasks' && (
+                <TaskTab />
             )}
 
             {/* Run Modal (Global) */}
