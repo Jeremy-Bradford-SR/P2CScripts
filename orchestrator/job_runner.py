@@ -101,6 +101,24 @@ class JobRunner:
             WHERE run_id=?
         """, (status, exit_code, run_id))
         end_conn.commit()
+        
+        # 6. Cleanup: Keep only last 5 runs
+        try:
+            end_conn.execute("""
+                DELETE FROM orchestrator_history 
+                WHERE job_id = ? 
+                AND run_id NOT IN (
+                    SELECT run_id 
+                    FROM orchestrator_history 
+                    WHERE job_id = ? 
+                    ORDER BY start_time DESC 
+                    LIMIT 5
+                )
+            """, (job_id, job_id))
+            end_conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to cleanup history for job {job_id}: {e}")
+
         return_db_connection(end_conn)
         
         return run_id
