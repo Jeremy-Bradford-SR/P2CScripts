@@ -32,6 +32,9 @@ COPY --from=ui-build /app/ui/dist ./orchestrator/ui/dist
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
+# Create data directory for persistence
+RUN mkdir -p /data
+
 # Run Orchestrator
 EXPOSE 8005
 CMD ["python3", "-m", "orchestrator.server"]

@@ -19,7 +19,16 @@ def get_db_connection():
             pass
     
     # Create new connection
-    _thread_local.connection = sqlite3.connect('/tmp/orchestrator.db', timeout=10.0, check_same_thread=True)
+    db_path = os.getenv("ORCHESTRATOR_DB_PATH", "/tmp/orchestrator.db")
+    # Ensure directory exists if it's not /tmp (e.g. /data)
+    db_dir = os.path.dirname(db_path)
+    if db_dir and not os.path.exists(db_dir):
+        try:
+            os.makedirs(db_dir, exist_ok=True)
+        except:
+            pass
+            
+    _thread_local.connection = sqlite3.connect(db_path, timeout=10.0, check_same_thread=True)
     return _thread_local.connection
 
 def return_db_connection(conn):
