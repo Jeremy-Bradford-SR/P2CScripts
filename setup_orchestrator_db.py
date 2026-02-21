@@ -1,6 +1,7 @@
 import pyodbc
 import os
 import glob
+import json
 from shared_utils import status
 from orchestrator.db import get_db_connection
 
@@ -92,6 +93,13 @@ def create_tables(scan_dir="."):
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(run_id) REFERENCES orchestrator_history(run_id)
         )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS orchestrator_config (
+            config_key TEXT PRIMARY KEY,
+            config_value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
         """
     ]
 
@@ -117,6 +125,20 @@ def create_tables(scan_dir="."):
         
         if new_count > 0:
             status("DB Setup", f"Registered {new_count} new scripts.")
+
+        # Seed initial Proxy Manager Config
+        cursor.execute("SELECT 1 FROM orchestrator_config WHERE config_key = 'proxy_manager_config'")
+        if not cursor.fetchone():
+            default_config = {
+                "concurrency": int(os.environ.get("PROXY_CONCURRENCY", 250)),
+                "ttl": int(os.environ.get("PROXY_TTL", 600)),
+                "test_url": os.environ.get("PROXY_TEST_URL", "http://p2c.cityofdubuque.org/main.aspx"),
+                "target_pool_size": int(os.environ.get("PROXY_TARGET_POOL_SIZE", 100)),
+                "sources": [s.strip() for s in os.environ.get("PROXY_SOURCES", "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt").split(",")]
+            }
+            cursor.execute("INSERT INTO orchestrator_config (config_key, config_value) VALUES (?, ?)", 
+                           ("proxy_manager_config", json.dumps(default_config)))
+            status("DB Setup", "Seeded default proxy_manager_config.")
 
         conn.commit()
         status("DB Setup", "Database setup complete.")

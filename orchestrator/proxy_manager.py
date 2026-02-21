@@ -6,6 +6,7 @@ import random
 import re
 import logging
 from concurrent.futures import ThreadPoolExecutor
+import json
 from typing import List, Dict, Set, Optional, Any, Union
 
 # Configure logger for this module
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class ProxyManager:
     _instance: Optional['ProxyManager'] = None
-    _lock: threading.Lock = threading.Lock()
+    _lock: threading.RLock = threading.RLock()
     
     def __new__(cls) -> 'ProxyManager':
         if cls._instance is None:
@@ -27,10 +28,12 @@ class ProxyManager:
                         "test_url": "http://p2c.cityofdubuque.org/main.aspx",
                         "target_pool_size": 100,
                         "sources": [
-                            # Original
                             "https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt"
                         ]
                     }
+                    
+                    # Try to load from DB explicitly on boot
+                    cls._instance._load_config_from_db()
                     
                     # State
                     cls._instance.valid_proxies = [] # type: List[str]
@@ -42,6 +45,26 @@ class ProxyManager:
                     cls._instance.churn_stats = {"checked": 0, "success": 0}
 
         return cls._instance
+
+    def _load_config_from_db(self) -> None:
+        try:
+            from .db import get_db_connection, return_db_connection
+            conn = get_db_connection()
+            if conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT config_value FROM orchestrator_config WHERE config_key = 'proxy_manager_config'")
+                row = cursor.fetchone()
+                if row:
+                    new_config = json.loads(row[0])
+                    # Update config safely
+                    if hasattr(self, '_lock'):
+                        with self._lock:
+                            self.config.update(new_config)
+                    else:
+                        self.config.update(new_config)
+                return_db_connection(conn)
+        except Exception as e:
+            logger.error(f"[ProxyManager] Error loading config from DB: {e}")
 
     def start_refresher(self) -> None:
         if self.running: return
@@ -75,6 +98,9 @@ class ProxyManager:
         logger.info("[ProxyManager] Started Source Fetch Loop.")
         while self.running:
             try:
+                # Dynamically reload Config from Database periodically
+                self._load_config_from_db()
+
                 # Re-fetch sources if TTL expired or pool is empty
                 if not self.raw_proxies_pool or (time.time() - self.last_fetch_time > self.config["ttl"]):
                     self._fetch_sources()

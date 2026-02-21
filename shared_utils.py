@@ -4,6 +4,7 @@ import time
 import random
 import logging
 import requests
+from requests.adapters import HTTPAdapter
 import concurrent.futures
 import argparse
 import json
@@ -54,6 +55,12 @@ def status(step: str, message: str) -> None:
 API_BASE_URL: str = os.getenv("API_BASE_URL", "http://p2capi:8080/api") # Internal Docker URL
 API_KEY: Optional[str] = os.getenv("API_KEY")
 
+# Global session with connection pooling for APIClient
+_global_api_session = requests.Session()
+_global_api_adapter = HTTPAdapter(pool_connections=200, pool_maxsize=200, max_retries=3)
+_global_api_session.mount('http://', _global_api_adapter)
+_global_api_session.mount('https://', _global_api_adapter)
+
 class APIClient:
     def __init__(self) -> None:
         self.base_url: str = API_BASE_URL
@@ -66,7 +73,7 @@ class APIClient:
         """Internal helper to handle requests, error logging, and JSON parsing."""
         url = f"{self.base_url}/{endpoint}"
         try:
-            resp = requests.request(method, url, headers=self.headers, timeout=60, **kwargs)
+            resp = _global_api_session.request(method, url, headers=self.headers, timeout=60, **kwargs)
             resp.raise_for_status()
             return resp.json()
         except requests.RequestException as e:

@@ -9,6 +9,9 @@ from .db import get_db_connection, return_db_connection
 logger = logging.getLogger("JobRunner")
 
 class JobRunner:
+    # Dictionary to track running subprocesses by run_id
+    active_processes = {}
+    
     @staticmethod
     async def run_job(job_id, script_path, config_override=None, proxy_manager=None):
         """
@@ -61,6 +64,9 @@ class JobRunner:
                 cwd=os.path.dirname(script_path)
             )
             
+            # Track the process for cancellation
+            JobRunner.active_processes[run_id] = process
+            
             # 4. Stream Logs to Queue
             async def read_stream(stream, stream_name):
                 while True:
@@ -82,6 +88,9 @@ class JobRunner:
             await log_writer_task
             
             exit_code = await process.wait()
+            # Remove from tracking once complete
+            JobRunner.active_processes.pop(run_id, None)
+            
             status = 'SUCCESS' if exit_code == 0 else 'FAILURE'
             
         except Exception as e:
@@ -92,6 +101,7 @@ class JobRunner:
             await log_queue.put(f"CRASH: {str(e)}")
             await log_queue.put(None)
             await log_writer_task
+            JobRunner.active_processes.pop(run_id, None)
 
         # 5. DB: Update History Record
         end_conn = get_db_connection()
@@ -164,3 +174,17 @@ class JobRunner:
                 )
                 conn.commit()
                 batch = []
+
+    @staticmethod
+    def cancel_job(run_id):
+        """Attempts to cleanly terminate a running job process."""
+        process = JobRunner.active_processes.get(run_id)
+        if process:
+            try:
+                # Send SIGTERM for graceful shutdown
+                process.terminate()
+                return True
+            except Exception as e:
+                logger.error(f"Failed to terminate run {run_id}: {e}")
+                return False
+        return False

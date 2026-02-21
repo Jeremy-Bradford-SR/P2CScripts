@@ -99,10 +99,10 @@ def verify_database_state(start_date, end_date):
 def get_fresh_session(user_agent, proxy_pool):
     """
     Acquires a new, fresh requests.Session object with a valid ASP.NET_SessionId.
-    Implements the 3x3 retry strategy: 
+    Implements the 10x3 retry strategy: 
     - Try 3 times with the same proxy.
     - If fails, switch proxy and try 3 times.
-    - Repeat up to 3 distinct proxies (Total 9 attempts).
+    - Repeat up to 10 distinct proxies (Total 30 attempts).
     """
     headers = {"User-Agent": user_agent}
 
@@ -124,8 +124,8 @@ def get_fresh_session(user_agent, proxy_pool):
     local_proxy_pool = list(proxy_pool)
     random.shuffle(local_proxy_pool)
     
-    # Try up to 3 distinct proxies
-    for proxy_idx, proxy in enumerate(local_proxy_pool[:3]):
+    # Try up to 10 distinct proxies
+    for proxy_idx, proxy in enumerate(local_proxy_pool[:10]):
         proxies_dict = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
         
         # Try 3 times per proxy
@@ -264,18 +264,20 @@ def process_day(current_date, valid_proxies):
                     try:
                         raw_id = str(record.get('id', '') or '').strip()
                         rec_key = str(record.get('key', '') or '').strip()
-                        rec_id = raw_id
                         
-                        # Synthetic ID for missing IDs
-                        if (not raw_id or raw_id == '&nbsp;') and rec_key == 'TA':
-                            unique_str = f"{record.get('time')}{record.get('location')}{record.get('name')}{record.get('description')}"
-                            rec_id = hashlib.md5(unique_str.encode('utf-8')).hexdigest()
+                        # Generate a robust, deterministic composite ID.
+                        # This successfully prevents collisions from missing IDs ('&nbsp;'), 
+                        # erroneous short IDs (like '2025'), and crucially preserves multiple 
+                        # distinct charges for the exact same incident that otherwise share the same raw_id.
+                        unique_blob = f"{raw_id}_{record.get('name', '')}_{record.get('time', '')}_{record.get('charge', '')}_{record.get('location', '')}"
+                        rec_id = hashlib.md5(unique_blob.encode('utf-8')).hexdigest()
 
                         dto = {
                             "invid": record.get("invid"),
-                            "key": record.get("key"),
+                            "key": rec_key,
                             "location": record.get("location"),
                             "id": rec_id,
+                            "site_id": raw_id,
                             "name": record.get("name"),
                             "crime": record.get("crime"),
                             "time": record.get("time"),

@@ -75,56 +75,62 @@ def update_event_time(target_ids=None):
     failed_count = 0
     total_processed = 0
 
-    while True:
-        candidates = []
-        try:
-            if target_ids:
-                candidates = api.post("tools/dab-time/fetch-details", {"ids": target_ids})
-                # Single pass for target_ids
-            else:
-                # Fetch batch of 100
-                candidates = api.get("tools/dab-time/candidates?count=100")
-        except Exception as ex:
-            print(f"[ERROR] API Fetch failed: {ex}")
-            # Raise exception to propagate failure to caller (Orchestrator/Ingestion)
-            raise ex
-        
-        if not candidates:
-            # print("No candidates found.")
-            break
+    # If target_ids is provided, create chunks of 500. Otherwise, dummy list for the fallback while loop.
+    chunks = [target_ids[i:i + 500] for i in range(0, len(target_ids), 500)] if target_ids else [None]
 
-        updates = []
-        for row in candidates:
-            rec_id = row.get("id") or row.get("Id")
-            raw_time = row.get("time") or row.get("TimeText")
-            
-            event_time = parse_time_with_regex(raw_time)
-            
-            if event_time:
-                 updates.append({
-                     "Id": str(rec_id),
-                     "EventTime": event_time.isoformat()
-                 })
-                 updated_count += 1
-            else:
-                 failed_count += 1
-        
-        if updates:
+    for chunk in chunks:
+        while True:
+            candidates = []
             try:
-                api.post("tools/dab-time/update", updates)
-                print(f"Updated batch of {len(updates)}")
-            except Exception as e:
-                print(f"[ERROR] Batch Update failed: {e}")
-                # Raise exception to propagate failure
-                raise e
+                if target_ids:
+                    candidates = api.post("tools/dab-time/fetch-details", {"ids": chunk})
+                    # Single pass for this chunk
+                else:
+                    # Fetch batch of 100
+                    candidates = api.get("tools/dab-time/candidates?count=100")
+            except Exception as ex:
+                print(f"[ERROR] API Fetch failed: {ex}")
+                raise ex
+            
+            if not candidates:
+                break
 
-        total_processed += len(candidates)
-        
-        if target_ids:
-            break
-        
-        if not candidates:
-             break
+            updates = []
+            for row in candidates:
+                rec_id = row.get("id") or row.get("Id")
+                raw_time = row.get("time") or row.get("TimeText")
+                
+                event_time = parse_time_with_regex(raw_time)
+                
+                if event_time:
+                     updates.append({
+                         "Id": str(rec_id),
+                         "EventTime": event_time.isoformat()
+                     })
+                     updated_count += 1
+                else:
+                     failed_count += 1
+                     updates.append({
+                         "Id": str(rec_id),
+                         "EventTime": "1900-01-01T00:00:00"
+                     })
+            
+            if updates:
+                try:
+                    # Batch update in chunks of 500 max is safe for SQL
+                    api.post("tools/dab-time/update", updates)
+                    print(f"Updated batch of {len(updates)}")
+                except Exception as e:
+                    print(f"[ERROR] Batch Update failed: {e}")
+                    raise e
+
+            total_processed += len(candidates)
+            
+            if target_ids:
+                break # Break inner while loop, move to next chunk
+            
+            if not candidates:
+                 break
 
     print(f"\n[SUCCESS] Script finished.")
     print(f"  - Rows successfully updated: {updated_count}")

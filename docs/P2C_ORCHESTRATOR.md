@@ -21,10 +21,23 @@ Scripts have been refactored into specialized directories for better organizatio
 - `orchestrator/`: The FastAPI backend and React frontend.
 
 ### 3. Proxy "Smart Pool"
-The proxy manager now actively maintains a target of **100 valid proxies**.
-- It pauses validation when the pool is full.
-- It automatically resumes refreshing when the count drops.
-- **Strict Validation**: Proxies must pass a check against `iowasexoffender.gov` to be considered valid.
+The proxy manager now actively maintains a target of **300+ valid HTTP proxies**.
+- It fetches massive lists from public repositories (e.g., `proxifly` GitHub).
+- Proxies are validated concurrently against `http://example.com` to ensure general connectivity before deployment.
+- Hardcoded timeout checks drop incredibly slow proxies to prevent scraping delays.
+- The pipeline gracefully tolerates `403 Forbidden` and `Timeout` errors during runtime by dynamically rotating the thread to a fresh proxy.
+
+### 4. Post-Processing ETL Integration
+The ingestion scripts no longer run in isolation. When a scraping cycle completes:
+1. **Target Identification**: The orchestrator triggers purely the rows that were newly inserted for downstream ETL processing. If `0` rows were inserted, it triggers a fallback queue of `ALL` rows missing coordinates or parsed time representations.
+2. **`UpdateDAB_TimetoEventTime`**: Parses raw scraped `TimeText` and casts it to a validated standardized SQL `event_time`. Unparseable times are forced to `1900-01-01T00:00:00` to prevent infinite queues.
+3. **`backfill_geocoding`**: Triggers targeted Address Line Geocoding directly inside the ETL container using cross-referenced APIs to generate Map Coordinates.
+
+### 5. Day Theme Mobile-First UI
+The interface has been fully rebuilt from the ground up:
+- **Clean Aesthetic**: Crisp `white` backgrounds, subtle soft shadows, and a "Google Blue" `#2563eb` primary accent color.
+- **Mobile First**: Eradicated "Hamburger menus". Now uses an OS-native Fixed Bottom Navigation Bar for instantaneous thumb access across mobile viewports.
+- **Scroll Eradication**: Terminal execution logs are now displayed in a full-screen Bottom Sheet overlay on mobile, and standard History output dynamically converts from Tables to dense touchable Cards.
 
 ---
 

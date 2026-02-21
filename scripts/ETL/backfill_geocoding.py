@@ -150,146 +150,114 @@ def extract_coordinates(address):
 def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
     """Reads rows with null lat/lon, geocodes, and updates them via API."""
     api = shared_utils.APIClient()
-    
-    # Pre-check or just loop
     total_processed = 0
-    
-    while True:
-        candidates = []
-        try:
-            if target_ids:
-                # Targeted Fetch
-                candidates = api.post("tools/geocode/fetch-addresses", {"ids": [str(x) for x in target_ids], "table": table})
-                # Only run once if targeted
-                target_ids = None # Clear after first run check?
-                # Actually, if we pass target_ids, we process them and break.
-            else:
-                # Batch Fetch
-                candidates = api.get(f"tools/geocode/candidates?table={table}&count=50")
-        except Exception as e:
-            print(f"API Fetch Error: {e}")
-            raise e
-            
-        if not candidates:
-            break
-            
-        updates = []
-        for row in candidates:
-            record_id = row.get('id') or row.get('Id')
-            raw_address = row.get('address') or row.get('Address')
-            
-            if not raw_address:
-                continue
+    chunks = [target_ids[i:i + 500] for i in range(0, len(target_ids), 500)] if target_ids else [None]
 
-            # 0. Check for direct coordinates in the string
-            lat, lon = extract_coordinates(raw_address)
-            
-            if not lat:
-                # Normal Geocoding Flow
-                address = clean_address(raw_address)
+    for chunk in chunks:
+        while True:
+            candidates = []
+            try:
+                if target_ids:
+                    candidates = api.post("tools/geocode/fetch-addresses", {"ids": [str(x) for x in chunk], "table": table})
+                else:
+                    candidates = api.get(f"tools/geocode/candidates?table={table}&count=50")
+            except Exception as e:
+                print(f"API Fetch Error: {e}")
+                raise e
                 
-                # Skip known bad
-                if "PBX" in address or "UNKNOWN" in address:
-                    print(f"Skipping known bad: {address}")
-                    updates.append({"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table})
+            if not candidates:
+                break
+                
+            updates = []
+            for row in candidates:
+                record_id = row.get('id') or row.get('Id')
+                raw_address = row.get('address') or row.get('Address')
+                
+                if not raw_address:
                     continue
 
-                def fetch_coords(query):
-                    for attempt in range(2): # Reduced retries for speed
-                        try:
-                            # Use requests directly for proxy as it might be internal or direct
-                            # Usually PROXY_GEOCODE_URL is external or internal service
-                            # "http://localhost:9000/geocode" -> p2cproxy:9000
-                            # If running in orchestrator, localhost:9000 IS available (if host net?)
-                            # No, orchestrator is in container. localhost refers to itself.
-                            # It should use "http://p2cproxy:9000/geocode"
-                            # But wait, PROXY_GEOCODE_URL is defined at top.
-                            # I'll rely on it being correct or update it.
-                            # Assuming "http://p2cproxy:9000/geocode" for container networking.
-                            # Or PROXY_GEOCODE_URL
-                            
-                            r = requests.get(PROXY_GEOCODE_URL, params={'q': query}, timeout=3)
-                            if r.status_code == 200:
-                                d = r.json()
-                                if d and 'lat' in d and 'lon' in d:
-                                    return float(d['lat']), float(d['lon'])
-                        except Exception:
-                            time.sleep(0.1)
-                        time.sleep(0.1)
-                    return None, None
-
-                # 1. Try cleaned address
-                lat, lon = fetch_coords(address)
-
-                # 2. Fallback: Intersection Split
-                if (lat is None) and " & " in address:
-                    parts = address.split(" & ")
-                    # Extract city suffix
-                    city_suffix = ", DUBUQUE, IA"
-                    if "," in parts[-1]:
-                        city_suffix = parts[-1][parts[-1].find(","):]
-                    valid_coords = []
-                    for part in parts:
-                        part = part.strip()
-                        if not part: continue
-                        query = part if "," in part else part + city_suffix
-                        plat, plon = fetch_coords(query)
-                        if plat: valid_coords.append((plat, plon))
-                    if valid_coords:
-                        lat = sum(c[0] for c in valid_coords) / len(valid_coords)
-                        lon = sum(c[1] for c in valid_coords) / len(valid_coords)
-                        print(f"  -> Resolved intersection: {lat}, {lon}")
-
-                # 3. Fallback: Street Only (with City)
-                if (lat is None) and address[0].isdigit():
-                    parts = address.split(" ", 1)
-                    if len(parts) > 1:
-                        street_with_city = parts[1]
-                        # print(f"  -> Trying street fallback: {street_with_city}")
-                        lat, lon = fetch_coords(street_with_city)
+                lat, lon = extract_coordinates(raw_address)
                 
-                # 4. Fallback: Bare Street
-                if (lat is None):
-                    bare_addr = address.split(',')[0].strip()
-                    if bare_addr[0].isdigit() and " " in bare_addr:
-                         bare_addr = bare_addr.split(" ", 1)[1]
-                    # print(f"  -> Trying bare street: {bare_addr}")
-                    lat, lon = fetch_coords(bare_addr)
-                    if not lat and "NORTHWEST ARTERIAL" in address:
-                         lat, lon = fetch_coords("NW ARTERIAL")
+                if not lat:
+                    address = clean_address(raw_address)
+                    
+                    if "PBX" in address or "UNKNOWN" in address:
+                        print(f"Skipping known bad: {address}")
+                        updates.append({"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table})
+                        continue
 
-                # 5. Fallback: County
-                if (lat is None) and "DUBUQUE" in address:
-                    county_addr = address.replace("DUBUQUE", "DUBUQUE COUNTY")
-                    # print(f"  -> Trying county: {county_addr}")
-                    lat, lon = fetch_coords(county_addr)
+                    def fetch_coords(query):
+                        for attempt in range(2):
+                            try:
+                                r = requests.get(PROXY_GEOCODE_URL, params={'q': query}, timeout=3)
+                                if r.status_code == 200:
+                                    d = r.json()
+                                    if d and 'lat' in d and 'lon' in d:
+                                        return float(d['lat']), float(d['lon'])
+                            except Exception:
+                                time.sleep(0.1)
+                            time.sleep(0.1)
+                        return None, None
 
-            if lat is not None and lon is not None:
-                updates.append({"Id": str(record_id), "Lat": lat, "Lon": lon, "Table": table})
-                print(f"Geocoded {record_id}: {lat}, {lon}")
-            else:
-                print(f"Failed Geocode {record_id} ({raw_address}) -> Cleaned: {address}")
-                updates.append({"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table})
+                    lat, lon = fetch_coords(address)
+
+                    if (lat is None) and " & " in address:
+                        parts = address.split(" & ")
+                        city_suffix = ", DUBUQUE, IA"
+                        if "," in parts[-1]:
+                            city_suffix = parts[-1][parts[-1].find(","):]
+                        valid_coords = []
+                        for part in parts:
+                            part = part.strip()
+                            if not part: continue
+                            query = part if "," in part else part + city_suffix
+                            plat, plon = fetch_coords(query)
+                            if plat: valid_coords.append((plat, plon))
+                        if valid_coords:
+                            lat = sum(c[0] for c in valid_coords) / len(valid_coords)
+                            lon = sum(c[1] for c in valid_coords) / len(valid_coords)
+                            print(f"  -> Resolved intersection: {lat}, {lon}")
+
+                    if (lat is None) and address[0].isdigit():
+                        parts = address.split(" ", 1)
+                        if len(parts) > 1:
+                            street_with_city = parts[1]
+                            lat, lon = fetch_coords(street_with_city)
+                    
+                    if (lat is None):
+                        bare_addr = address.split(',')[0].strip()
+                        if bare_addr[0].isdigit() and " " in bare_addr:
+                             bare_addr = bare_addr.split(" ", 1)[1]
+                        lat, lon = fetch_coords(bare_addr)
+                        if not lat and "NORTHWEST ARTERIAL" in address:
+                             lat, lon = fetch_coords("NW ARTERIAL")
+
+                    if (lat is None) and "DUBUQUE" in address:
+                        county_addr = address.replace("DUBUQUE", "DUBUQUE COUNTY")
+                        lat, lon = fetch_coords(county_addr)
+
+                if lat is not None and lon is not None:
+                    updates.append({"Id": str(record_id), "Lat": lat, "Lon": lon, "Table": table})
+                    print(f"Geocoded {record_id}: {lat}, {lon}")
+                else:
+                    print(f"Failed Geocode {record_id} ({raw_address}) -> Cleaned: {address}")
+                    updates.append({"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table})
+                
+                total_processed += 1
+                time.sleep(0.05)
+                
+            if updates:
+                try:
+                    api.post("tools/geocode/update", updates)
+                except Exception as e:
+                    print(f"Update Batch Error: {e}")
+                    raise e
             
-            total_processed += 1
-            time.sleep(0.05)
-            
-        # Send updates
-        if updates:
-            try:
-                api.post("tools/geocode/update", updates)
-            except Exception as e:
-                print(f"Update Batch Error: {e}")
-                raise e
-        
-        # If we were doing targeted, we are done
-        if target_ids is None and not candidates: 
-           break
-        if candidates and target_ids is not None: 
-           # We processed the target batch, so break
-           break
-
+            if target_ids:
+               break
+               
     print(f"Processed {total_processed} records.")
+
 
 def main():
     import argparse

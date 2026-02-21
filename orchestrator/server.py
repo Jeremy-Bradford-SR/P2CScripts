@@ -43,8 +43,17 @@ async def lifespan(app: FastAPI):
         # Scan dir is parent of this file
         scan_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         create_tables(scan_dir)
+        
+        # Cleanup orphaned jobs from previous container run
+        conn = get_db_connection()
+        if conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE orchestrator_history SET status='CANCELLED', exit_code=-1 WHERE status='RUNNING'")
+            conn.commit()
+            return_db_connection(conn)
+            print("Cleaned up orphaned RUNNING jobs.")
     except Exception as e:
-        print(f"DB Init Failed: {e}")
+        print(f"DB Init/Cleanup Failed: {e}")
         
     ProxyManager().start_refresher()
     
@@ -138,6 +147,51 @@ def health_check():
     if conn: return_db_connection(conn)
     return {"db": "connected" if valid else "error", "proxies": len(ProxyManager().get_proxies())}
 
+@app.get("/api/config")
+def get_config():
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    cursor = conn.cursor()
+    cursor.execute("SELECT config_key, config_value FROM orchestrator_config")
+    config = {}
+    import json
+    for row in cursor.fetchall():
+        try:
+            config[row[0]] = json.loads(row[1])
+        except:
+            config[row[0]] = row[1]
+    return_db_connection(conn)
+    return config
+
+@app.put("/api/config/{config_key}")
+async def update_config(config_key: str, request: dict):
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    import json
+    try:
+        config_value = json.dumps(request)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM orchestrator_config WHERE config_key = ?", (config_key,))
+        if cursor.fetchone():
+            cursor.execute("UPDATE orchestrator_config SET config_value = ?, updated_at = CURRENT_TIMESTAMP WHERE config_key = ?", (config_value, config_key))
+        else:
+            cursor.execute("INSERT INTO orchestrator_config (config_key, config_value) VALUES (?, ?)", (config_key, config_value))
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        return_db_connection(conn)
+        raise HTTPException(status_code=400, detail=str(e))
+    
+    return_db_connection(conn)
+    
+    # If proxy_manager_config changed, force it to reload
+    if config_key == "proxy_manager_config":
+        ProxyManager()._load_config_from_db()
+        
+    return {"status": "success", "config_key": config_key}
+
 @app.get("/api/jobs")
 def get_jobs():
     conn = get_db_connection()
@@ -179,6 +233,21 @@ async def run_job(job_id: int, request: RunJobRequest, background_tasks: Backgro
     # Task will update active_tasks dict with run_id when available
     # For now, return immediately
     return {"status": "Job started", "job_id": job_id}
+
+@app.post("/api/jobs/{run_id}/kill")
+def kill_job(run_id: int):
+    """Kills a currently running job instance by its run_id."""
+    success = JobRunner.cancel_job(run_id)
+    if success:
+        # Update DB to reflect cancellation immediately
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE orchestrator_history SET status='CANCELLED', exit_code=-1 WHERE run_id=?", (run_id,))
+        conn.commit()
+        return_db_connection(conn)
+        return {"status": "Job killed successfully", "run_id": run_id}
+    else:
+        raise HTTPException(status_code=404, detail="Job not found or already completed/cancelled")
 
 @app.get("/api/history")
 def get_history(limit: int = 50):
