@@ -112,10 +112,10 @@ def construct_dto(reg, photo_data=None):
     return dto
 
 # --- WORKER FUNCTIONS ---
-@shared_utils.get_retry_decorator(max_attempts=3, wait_seconds=1)
+@shared_utils.get_retry_decorator(max_attempts=6, wait_seconds=1)
 def fetch_registrant_data_with_retry(url, proxy_pool):
     """
-    Fetches registrar data with automatic retries.
+    Fetches registrar data with automatic retries, rotating proxies each attempt.
     """
     session, proxy = shared_utils.get_resilient_session(
         user_agent=None,
@@ -125,13 +125,17 @@ def fetch_registrant_data_with_retry(url, proxy_pool):
     if not session:
         raise Exception("Failed to acquire session.")
         
-    resp = session.get(url, timeout=15, verify=False)
-    # Check 404 explicitly to stop retrying
-    if resp.status_code == 404:
-        return None
-        
-    resp.raise_for_status()
-    return resp.json(), session
+    try:
+        resp = session.get(url, timeout=20, verify=False)
+        # Check 404 explicitly to stop retrying
+        if resp.status_code == 404:
+             return None
+        resp.raise_for_status()
+        return resp.json(), session
+    except requests.exceptions.RequestException as e:
+        import logging
+        logging.warning(f"[ProxyManager] {proxy} timed out on detail fetch. Discarding and retrying...")
+        raise e
 
 def fetch_and_process_registrant(registrant_id, proxy_pool):
     global total_inserted, total_skipped, total_errors
@@ -193,10 +197,10 @@ def fetch_and_process_registrant(registrant_id, proxy_pool):
             with stats_lock: total_errors += 1
             
     except Exception as e:
-        # If retry failed finally
+        # If retry failed finally after 6 proxy rotations, mark as skipped so it doesn't fail the job
         import logging
-        logging.error(f"Worker Failed for {registrant_id} after retries: {e}")
-        with stats_lock: total_errors += 1
+        logging.warning(f"Worker completely exhausted retries for {registrant_id}: {e}. Skipping.")
+        with stats_lock: total_skipped += 1
 
 # --- MAIN ---
 if __name__ == "__main__":

@@ -168,13 +168,14 @@ def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
             if not candidates:
                 break
                 
-            updates = []
-            for row in candidates:
+            import concurrent.futures
+
+            def process_row(row):
                 record_id = row.get('id') or row.get('Id')
                 raw_address = row.get('address') or row.get('Address')
                 
                 if not raw_address:
-                    continue
+                    return None
 
                 lat, lon = extract_coordinates(raw_address)
                 
@@ -183,8 +184,7 @@ def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
                     
                     if "PBX" in address or "UNKNOWN" in address:
                         print(f"Skipping known bad: {address}")
-                        updates.append({"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table})
-                        continue
+                        return {"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table}
 
                     def fetch_coords(query):
                         for attempt in range(2):
@@ -195,7 +195,7 @@ def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
                                     if d and 'lat' in d and 'lon' in d:
                                         return float(d['lat']), float(d['lon'])
                             except Exception:
-                                time.sleep(0.1)
+                                pass
                             time.sleep(0.1)
                         return None, None
 
@@ -237,14 +237,20 @@ def geocode_and_update(table, id_col, address_col, time_col, target_ids=None):
                         lat, lon = fetch_coords(county_addr)
 
                 if lat is not None and lon is not None:
-                    updates.append({"Id": str(record_id), "Lat": lat, "Lon": lon, "Table": table})
                     print(f"Geocoded {record_id}: {lat}, {lon}")
+                    return {"Id": str(record_id), "Lat": lat, "Lon": lon, "Table": table}
                 else:
                     print(f"Failed Geocode {record_id} ({raw_address}) -> Cleaned: {address}")
-                    updates.append({"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table})
-                
-                total_processed += 1
-                time.sleep(0.05)
+                    return {"Id": str(record_id), "Lat": 0.0, "Lon": 0.0, "Table": table}
+
+            updates = []
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+                results = executor.map(process_row, candidates)
+                for res in results:
+                    if res:
+                        updates.append(res)
+            
+            total_processed += len(candidates)
                 
             if updates:
                 try:

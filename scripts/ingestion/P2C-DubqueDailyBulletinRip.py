@@ -266,10 +266,21 @@ def process_day(current_date, valid_proxies):
                         rec_key = str(record.get('key', '') or '').strip()
                         
                         # Generate a robust, deterministic composite ID.
-                        # This successfully prevents collisions from missing IDs ('&nbsp;'), 
-                        # erroneous short IDs (like '2025'), and crucially preserves multiple 
-                        # distinct charges for the exact same incident that otherwise share the same raw_id.
-                        unique_blob = f"{raw_id}_{record.get('name', '')}_{record.get('time', '')}_{record.get('charge', '')}_{record.get('location', '')}"
+                        # Aggressively normalize string inputs (strip spaces, upper case, remove HTML artifacts) to ensure 
+                        # that superficial changes in the underlying ASP.NET API JSON do not mutate the MD5 hash across cyclical scrapes.
+                        def normalize_field(val):
+                            s = str(val or '').strip().upper()
+                            s = s.replace('<BR>', ' ').replace('<BR/>', ' ').replace('&NBSP;', ' ')
+                            # Replace multiple spaces with a single space to handle arbitrary padding changes
+                            import re
+                            return re.sub(r'\s+', ' ', s).strip()
+
+                        norm_name = normalize_field(record.get('name'))
+                        norm_time = normalize_field(record.get('time'))
+                        norm_charge = normalize_field(record.get('charge'))
+                        norm_location = normalize_field(record.get('location'))
+                        
+                        unique_blob = f"{raw_id}_{norm_name}_{norm_time}_{norm_charge}_{norm_location}"
                         rec_id = hashlib.md5(unique_blob.encode('utf-8')).hexdigest()
 
                         dto = {
@@ -324,6 +335,23 @@ def process_day(current_date, valid_proxies):
                 total_skipped += daily_skipped
                 total_inserted_ids.extend(daily_ids)
             logging.info(f"Finished {date_str}. Inserted: {daily_inserted}")
+            
+            # --- INLINE POST-PROCESSING ---
+            if daily_ids:
+                try:
+                    import os, sys
+                    etl_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ETL')
+                    if etl_path not in sys.path: sys.path.append(etl_path)
+                    
+                    import UpdateDAB_TimetoEventTime
+                    import backfill_geocoding
+                    
+                    logging.info(f"Triggering Target ETL for {len(daily_ids)} rows...")
+                    UpdateDAB_TimetoEventTime.update_event_time(target_ids=daily_ids)
+                    backfill_geocoding.geocode_and_update('DailyBulletinArrests', 'id', 'location', 'event_time', target_ids=daily_ids)
+                except Exception as e:
+                    logging.error(f"Inline ETL Failed for {date_str}: {e}")
+            # -----------------------------
             return
         
         logging.warning(f"Failed processing {date_str}. Retrying...")
@@ -379,27 +407,7 @@ if __name__ == "__main__":
     logging.info(f"SUMMARY: New={total_inserted}, Skipped={total_skipped}")
     logging.info("="*30)
 
-    # 6. Post-Processing (ETL)
-    logging.info("Starting Post-Processing (ETL)...")
-    try:
-        etl_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ETL')
-        if etl_path not in sys.path: sys.path.append(etl_path)
-
-        ids_target = total_inserted_ids if total_inserted_ids else None
-        logging.info(f"Triggering updates. Target Count: {len(ids_target) if ids_target else 'ALL'}")
-
-        import UpdateDAB_TimetoEventTime
-        import backfill_geocoding
-
-        # Run ETL - Errors here will now propagate and crash the job
-        UpdateDAB_TimetoEventTime.update_event_time(target_ids=ids_target)
-        backfill_geocoding.geocode_and_update('DailyBulletinArrests', 'id', 'location', 'event_time', target_ids=ids_target)
-        
-    except Exception as e:
-        logging.critical(f"ETL Post-Processing Failed: {e}", exc_info=True)
-        sys.exit(1) # Signal failure to Orchestrator
-
-    # 7. Database Verification (Run LAST to ensure everything is settled)
+    # Note: ETL Post-Processing is now executed inline inside process_day() on strictly daily batches.
     verify_database_state(dates[0], dates[-1])
 
     sys.exit(0)

@@ -75,6 +75,8 @@ class APIClient:
         try:
             resp = _global_api_session.request(method, url, headers=self.headers, timeout=60, **kwargs)
             resp.raise_for_status()
+            if not resp.text.strip():
+                return {}
             return resp.json()
         except requests.RequestException as e:
             status("API", f"{method} Failed: {url} | {e}")

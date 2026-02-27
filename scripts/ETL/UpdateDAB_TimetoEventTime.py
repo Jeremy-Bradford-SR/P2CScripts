@@ -98,7 +98,7 @@ def update_event_time(target_ids=None):
             updates = []
             for row in candidates:
                 rec_id = row.get("id") or row.get("Id")
-                raw_time = row.get("time") or row.get("TimeText")
+                raw_time = row.get("time") or row.get("timeText") or row.get("TimeText")
                 
                 event_time = parse_time_with_regex(raw_time)
                 
